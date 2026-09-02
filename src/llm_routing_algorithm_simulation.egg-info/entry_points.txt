@@ -1,0 +1,3 @@
+[console_scripts]
+simulate-llm-routing = llm_routing_simulation.run:main
+simulate-synthetic-nonlinear = llm_routing_simulation.synthetic:main
