@@ -22,8 +22,10 @@ from llm_routing_simulation.cache import RoutingCache, load_cache
 from llm_routing_simulation.environment import LLMCascadeEnvironment
 from llm_routing_simulation.skyline import (
     binary_residual_diagnostics,
+    cross_fitted_residual_predictability,
     fit_supervised_skylines,
     plot_binary_residuals,
+    plot_residual_predictability,
     random_routing_reference,
 )
 
@@ -59,6 +61,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--igw-min-propensity", type=float, default=0.1)
     parser.add_argument("--random-repeats", type=int, default=100)
     parser.add_argument("--skyline-folds", type=int, default=5)
+    parser.add_argument(
+        "--residual-permutations",
+        type=int,
+        default=100,
+        help=(
+            "Shuffled-training-label refits for the residual predictability "
+            "test; use 0 to skip the permutation test"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
     return parser
 
@@ -268,7 +279,12 @@ def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
     return rows, trajectories
 
 
-def run_skyline(rounds, requested_folds: int, seed: int):
+def run_skyline(
+    rounds,
+    requested_folds: int,
+    seed: int,
+    residual_permutations: int,
+):
     contexts = np.stack([item.context for item in rounds])
     outcomes = np.asarray(
         [item.weak_answer != item.strong_answer for item in rounds], dtype=np.int64
@@ -280,7 +296,29 @@ def run_skyline(rounds, requested_folds: int, seed: int):
     residual_rows, residual_bin_rows = binary_residual_diagnostics(
         residual_probability_sets, outcomes
     )
-    return rows, summary, residual_rows, residual_bin_rows
+    (
+        residual_predictability_rows,
+        residual_predictability_bin_rows,
+        residual_permutation_rows,
+        residual_predictability_summary,
+    ) = cross_fitted_residual_predictability(
+        contexts,
+        outcomes,
+        seed=seed,
+        requested_folds=requested_folds,
+        permutation_repeats=residual_permutations,
+    )
+    summary["residual_predictability"] = residual_predictability_summary
+    return (
+        rows,
+        summary,
+        residual_rows,
+        residual_bin_rows,
+        residual_predictability_rows,
+        residual_predictability_bin_rows,
+        residual_permutation_rows,
+        residual_predictability_summary,
+    )
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
@@ -362,8 +400,15 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if any(value < args.l11 for value in args.l01_values):
         raise SystemExit("Every l01 must be greater than or equal to l11")
-    if args.random_repeats < 1 or args.skyline_folds < 2:
-        raise SystemExit("Random repeats must be positive and skyline folds >= 2")
+    if (
+        args.random_repeats < 1
+        or args.skyline_folds < 2
+        or args.residual_permutations < 0
+    ):
+        raise SystemExit(
+            "Random repeats must be positive, skyline folds >= 2, and residual "
+            "permutations nonnegative"
+        )
     if min(
         args.etc_tastes,
         args.cbpside_tastes,
@@ -391,6 +436,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     skyline_summary: dict = {}
     residual_rows: list[dict] = []
     residual_bin_rows: list[dict] = []
+    residual_predictability_rows: list[dict] = []
+    residual_predictability_bin_rows: list[dict] = []
+    residual_permutation_rows: list[dict] = []
+    residual_predictability_summary: dict = {}
     if args.experiment in {"all", "online"}:
         online_rows, trajectories = run_online(rounds, args)
         _write_csv(output / "online_results.csv", online_rows)
@@ -408,8 +457,15 @@ def main(argv: Iterable[str] | None = None) -> int:
             skyline_summary,
             residual_rows,
             residual_bin_rows,
+            residual_predictability_rows,
+            residual_predictability_bin_rows,
+            residual_permutation_rows,
+            residual_predictability_summary,
         ) = run_skyline(
-            rounds, args.skyline_folds, args.seed
+            rounds,
+            args.skyline_folds,
+            args.seed,
+            args.residual_permutations,
         )
         _write_csv(output / "supervised_skyline.csv", skyline_rows)
         (output / "supervised_skyline.json").write_text(
@@ -426,6 +482,29 @@ def main(argv: Iterable[str] | None = None) -> int:
             output / "supervised_residual_plots.png",
             residual_rows,
             residual_bin_rows,
+        )
+        _write_csv(
+            output / "residual_predictability.csv",
+            residual_predictability_rows,
+        )
+        _write_csv(
+            output / "residual_predictability_bins.csv",
+            residual_predictability_bin_rows,
+        )
+        _write_csv(
+            output / "residual_permutation_reference.csv",
+            residual_permutation_rows,
+        )
+        (output / "residual_predictability_summary.json").write_text(
+            json.dumps(_jsonable(residual_predictability_summary), indent=2),
+            encoding="utf-8",
+        )
+        plot_residual_predictability(
+            output / "residual_predictability.png",
+            residual_predictability_rows,
+            residual_predictability_bin_rows,
+            residual_permutation_rows,
+            residual_predictability_summary,
         )
 
     summary = {

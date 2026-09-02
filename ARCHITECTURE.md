@@ -84,7 +84,9 @@ It checks that updates correspond to the pending action and context.
 Produces stratified out-of-fold disagreement probabilities and threshold
 skylines. The real-data comparison includes standard logistic, several HGB
 capacities, MLP-4/MLP-8, elastic-net logistic, Extra Trees, calibrated RBF SVM,
-XGBoost, and optionally CatBoost.
+XGBoost, and optionally CatBoost. On the residual branch it also runs a nested
+cross-fitted HGB regression test for feature-predictable structure remaining in
+the logistic residuals, with a shuffled-training-residual permutation reference.
 
 ### `run.py`
 

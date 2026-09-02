@@ -87,10 +87,14 @@ range. MLP-8 was overconfident, underpredicting disagreement at low scores and
 overpredicting it at high scores. Residual-versus-probability plots assess
 calibration but do not establish the stronger condition `E[Y-p(X)|X]=0`.
 
-Planned next diagnostic: cross-fit a flexible residual learner on the original
-features and test whether it predicts held-out logistic residuals better than a
-zero-residual baseline. A permutation test can determine whether any apparent
-improvement exceeds chance.
+Implemented next diagnostic: nested cross-fit an HGB residual regressor on the
+original features and test whether it predicts held-out logistic residuals
+better than a zero-residual baseline. For every outer fold, the evaluated rows
+are absent from both the logistic and residual-learner fits; inner logistic
+cross-fitting constructs the residual targets used for residual-learner
+training. A shuffled-training-residual permutation reference tests whether the
+observed held-out MSE improvement exceeds chance. Record the resulting metrics
+below after the full-cache run.
 
 ## Template for future entries
 

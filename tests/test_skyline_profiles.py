@@ -12,7 +12,9 @@ from llm_routing_simulation.skyline import (
     HGB_CAPACITY_PROFILES,
     MLP_CAPACITY_PROFILES,
     binary_residual_diagnostics,
+    cross_fitted_residual_predictability,
     plot_binary_residuals,
+    plot_residual_predictability,
 )
 from llm_routing_simulation.run import _parser
 
@@ -72,6 +74,7 @@ def test_online_exploration_defaults():
     assert args.igw_min_tastes == 0
     assert args.igw_bootstrap_per_class == 10
     assert args.igw_bootstrap_max_tastes == 50
+    assert args.residual_permutations == 100
 
 
 def test_compact_mlp_capacity_sweep():
@@ -103,4 +106,34 @@ def test_binary_residual_diagnostics_and_plot(tmp_path):
 
     output = tmp_path / "residuals.png"
     plot_binary_residuals(output, points, bins)
+    assert output.exists() and output.stat().st_size > 0
+
+
+def test_cross_fitted_residual_predictability_and_plot(tmp_path):
+    rng = np.random.default_rng(17)
+    contexts = rng.normal(size=(90, 6))
+    nonlinear_score = contexts[:, 0] * contexts[:, 1]
+    probabilities = 1.0 / (1.0 + np.exp(-nonlinear_score))
+    outcomes = (rng.random(90) < probabilities).astype(np.int64)
+
+    points, bins, permutations, summary = cross_fitted_residual_predictability(
+        contexts,
+        outcomes,
+        seed=3,
+        requested_folds=3,
+        permutation_repeats=2,
+        bin_count=5,
+    )
+
+    assert len(points) == 90
+    assert len(bins) == 5
+    assert len(permutations) == 2
+    assert {row["outer_fold"] for row in points} == {1, 2, 3}
+    assert summary["outer_folds"] == 3
+    assert summary["zero_baseline_mse"] > 0.0
+    assert np.isfinite(summary["residual_learner_mse"])
+    assert 0.0 < summary["permutation_p_value_one_sided"] <= 1.0
+
+    output = tmp_path / "residual_predictability.png"
+    plot_residual_predictability(output, points, bins, permutations, summary)
     assert output.exists() and output.stat().st_size > 0

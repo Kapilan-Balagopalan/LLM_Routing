@@ -55,6 +55,16 @@ remain near the zero line without systematic curvature. The underlying raw,
 Pearson, and deviance residuals are saved in `supervised_residuals.csv`, and the
 bin summaries are saved in `supervised_residual_bins.csv`.
 
+The residual branch additionally asks whether the original context contains
+nonlinear signal left over after logistic regression. A nested cross-fitted HGB
+regressor predicts logistic residuals without seeing the evaluated outer fold.
+Its held-out mean-squared error is compared with predicting a zero residual, and
+100 shuffled-training-residual refits provide a one-sided permutation reference.
+Results are saved in `residual_predictability_summary.json`, three accompanying
+CSV files, and `residual_predictability.png`. Use
+`--residual-permutations 0` for a fast diagnostic without the permutation test,
+or another nonnegative count to control its precision and runtime.
+
 ## Current defaults
 
 - Context: 14 weak-generation uncertainty features plus the collected fixed PCA
