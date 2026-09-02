@@ -13,6 +13,8 @@
 - `main`: real ARC-Easy cached-data routing and supervised skyline baseline.
 - `experiment/synthetic-sanity`: nonlinear `x1*x2` synthetic sanity check.
 - `experiment/residual-diagnostics`: real-data Logistic/HGB/MLP residual work.
+- `experiment/prompt-embedding`: outcome-free semantic prompt augmentation and
+  its controlled supervised/residual comparison.
 - `backup/current-combined`: recovery snapshot made before branch separation.
 
 Do not mix an experiment into another branch. Shared bug fixes should be made

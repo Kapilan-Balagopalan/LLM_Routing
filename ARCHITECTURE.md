@@ -5,7 +5,9 @@
 This CPU-only project replays routing algorithms against a previously collected
 LLM cache. It does not load an LLM, download models, call Hugging Face, or need
 `HF_TOKEN`. LLM generation is owned by the separate
-`Data_collection_LLM_routing` project.
+`Data_collection_LLM_routing` project. On the prompt-embedding branch, one
+explicit preprocessing command may download a small public frozen encoder; no
+weak- or strong-model generation is repeated.
 
 ## Data flow
 
@@ -94,6 +96,20 @@ The `simulate-llm-routing` entry point runs online experiments, supervised
 skylines, or both. It writes reproducibility metadata, per-method summaries,
 full online trajectories, plots, and a ZIP bundle.
 
+### `prompt_embeddings.py`
+
+Builds semantic text from only the question and labeled choices, runs a frozen
+sentence encoder locally, and writes a versioned ZIP sidecar aligned by example
+ID. Its manifest records the encoder, hashes, dimensionality, and the guarantee
+that answer/outcome features were not used.
+
+### `prompt_experiment.py`
+
+Fits a 32-dimensional fixed transductive outcome-free PCA to prompt embeddings,
+then evaluates current-only, prompt-only, and concatenated contexts on identical
+out-of-fold splits. It also uses prompt features alone to predict residuals from
+the current-context logistic baseline.
+
 ## Branch-specific additions
 
 - `experiment/synthetic-sanity` adds `synthetic.py` and the
@@ -102,6 +118,8 @@ full online trajectories, plots, and a ZIP bundle.
 - `experiment/residual-diagnostics` adds out-of-fold raw, Pearson, and deviance
   residual tables plus binned residual plots for logistic, selected HGB, and
   selected MLP models.
+- `experiment/prompt-embedding` adds a frozen semantic sidecar, a three-context
+  supervised comparison, and an incremental prompt-residual test.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather
 than inferring research intent from implementation details alone.

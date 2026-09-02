@@ -4,7 +4,9 @@ This project reads the one-time cache produced by `Data_collection_LLM_routing`.
 It does not load an LLM, contact Hugging Face, need an `HF_TOKEN`, or require a
 GPU. The cached strong answer is retained as the evaluation reference, while
 the environment still hides that answer and the disagreement outcome whenever
-an online player chooses action 0.
+an online player chooses action 0. The optional prompt-embedding command is the
+one exception: when explicitly run, it downloads or loads a small frozen text
+encoder and performs local inference; it never reruns the weak or strong LLM.
 
 ## Set up on the laptop
 
@@ -97,6 +99,51 @@ simulate-llm-routing --cache llm-routing-cache.zip --l01-values 1 2 4 8 --seed 7
 To rebuild a lower-dimensional context using the fixed PCA axes saved in the
 cache, add `--pca-components 20` (or another available positive value).
 
+## Prompt-embedding experiment
+
+This branch tests whether question semantics add disagreement-prediction signal
+beyond the current uncertainty and hidden-state context. The cache already
+contains every ARC question and choice, so Qwen and Llama inference is not
+repeated.
+
+Install the optional local encoder dependency:
+
+```powershell
+python -m pip install -e ".[embedding,test]"
+```
+
+Encode each question and its labeled choices using the default public frozen
+encoder, `sentence-transformers/all-MiniLM-L6-v2`:
+
+```powershell
+collect-prompt-embeddings `
+  --cache llm-routing-cache.zip `
+  --output prompt-embeddings.zip `
+  --device cpu
+```
+
+The first invocation may download the encoder weights from Hugging Face. The
+embedding cache contains no outcomes, answer labels, or model responses and can
+be reused for every later simulation. The semantic text is exactly the question
+plus labeled choices; repeated generation instructions are excluded.
+
+Run the controlled CPU comparison:
+
+```powershell
+simulate-prompt-embedding-context `
+  --cache llm-routing-cache.zip `
+  --prompt-embeddings prompt-embeddings.zip `
+  --prompt-components 32 `
+  --residual-permutations 100
+```
+
+It uses identical folds to compare the current 78-dimensional context, the
+32-dimensional prompt PCA context, and their 110-dimensional concatenation.
+It also directly tests whether prompt features predict held-out residuals from
+the current logistic model. Prompt PCA is fixed, transductive, and outcome-free.
+Results are written to `prompt-embedding-results/` and bundled as
+`prompt-embedding-results.zip`.
+
 ## Where to edit
 
 - `src/llm_routing_simulation/algorithm.py`: ETC, CBPSide and IGW players.
@@ -105,5 +152,9 @@ cache, add `--pca-components 20` (or another available positive value).
 - `src/llm_routing_simulation/run.py`: experiment parameters, result tables and
   plots.
 - `src/llm_routing_simulation/cache.py`: cache validation and context selection.
+- `src/llm_routing_simulation/prompt_embeddings.py`: outcome-free prompt text,
+  frozen encoding, and portable sidecar validation.
+- `src/llm_routing_simulation/prompt_experiment.py`: three-context supervised
+  comparison and incremental prompt-residual test.
 
 Run tests with `python -m pytest`.

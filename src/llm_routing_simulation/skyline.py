@@ -763,6 +763,9 @@ def cross_fitted_residual_predictability(
     contexts: np.ndarray,
     outcomes: np.ndarray,
     *,
+    residual_contexts: np.ndarray | None = None,
+    base_context_label: str = "original context",
+    residual_context_label: str | None = None,
     seed: int = 0,
     requested_folds: int = 5,
     permutation_repeats: int = 100,
@@ -786,11 +789,18 @@ def cross_fitted_residual_predictability(
         ) from exc
 
     X = np.asarray(contexts, dtype=np.float64)
+    Z = X if residual_contexts is None else np.asarray(
+        residual_contexts, dtype=np.float64
+    )
     y = np.asarray(outcomes, dtype=np.int64).reshape(-1)
     if X.ndim != 2 or X.shape[0] == 0 or X.shape[0] != y.size:
         raise ValueError("Contexts must be a nonempty matrix aligned with outcomes")
     if not np.all(np.isfinite(X)) or np.any((y != 0) & (y != 1)):
         raise ValueError("Contexts must be finite and outcomes binary")
+    if Z.ndim != 2 or Z.shape[0] != y.size or not np.all(np.isfinite(Z)):
+        raise ValueError(
+            "Residual contexts must be a finite matrix aligned with outcomes"
+        )
     if requested_folds < 2:
         raise ValueError("requested_folds must be at least two")
     if permutation_repeats < 0:
@@ -881,8 +891,8 @@ def cross_fitted_residual_predictability(
         training_residuals = train_y.astype(np.float64) - inner_probabilities
 
         learner = residual_model(seed + 30_000 + fold_index, train_indices.size)
-        learner.fit(X[train_indices], training_residuals)
-        predicted_residuals[test_indices] = learner.predict(X[test_indices])
+        learner.fit(Z[train_indices], training_residuals)
+        predicted_residuals[test_indices] = learner.predict(Z[test_indices])
         fold_assignments[test_indices] = fold_index + 1
         residual_training_sets.append(
             (train_indices, test_indices, training_residuals)
@@ -963,8 +973,8 @@ def cross_fitted_residual_predictability(
                 seed + 50_000 + repeat * fold_count + fold_index,
                 train_indices.size,
             )
-            null_learner.fit(X[train_indices], shuffled_residuals)
-            null_predictions[test_indices] = null_learner.predict(X[test_indices])
+            null_learner.fit(Z[train_indices], shuffled_residuals)
+            null_predictions[test_indices] = null_learner.predict(Z[test_indices])
         null_mse = float(np.mean(np.square(observed_residuals - null_predictions)))
         null_improvement = zero_mse - null_mse
         permutation_rows.append(
@@ -993,14 +1003,19 @@ def cross_fitted_residual_predictability(
         permutation_p_value = None
         null_95_percentile = None
 
+    residual_label = residual_context_label or base_context_label
     summary = {
         "question": (
-            "Can the original context predict held-out logistic residuals better "
-            "than the zero-residual baseline?"
+            f"Can {residual_label} predict held-out logistic residuals from "
+            f"{base_context_label} better than the zero-residual baseline?"
         ),
         "method": "nested cross-fitted HGB residual regression",
         "examples": int(y.size),
+        "base_context": base_context_label,
         "context_dimension": int(X.shape[1]),
+        "base_context_dimension": int(X.shape[1]),
+        "residual_context": residual_label,
+        "residual_context_dimension": int(Z.shape[1]),
         "outer_folds": int(fold_count),
         "requested_inner_folds": int(requested_folds),
         "residual_definition": "observed disagreement minus logistic probability",

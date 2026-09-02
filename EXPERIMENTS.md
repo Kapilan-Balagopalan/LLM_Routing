@@ -11,6 +11,7 @@ decision.
 | `main` | Real ARC-Easy routing and supervised skyline baseline |
 | `experiment/synthetic-sanity` | Controlled nonlinear `x1*x2` sanity check |
 | `experiment/residual-diagnostics` | Real-data model-specification diagnostics |
+| `experiment/prompt-embedding` | Incremental semantic prompt-feature test |
 | `backup/current-combined` | Recovery snapshot before branch separation |
 
 Initial combined checkpoint: tag `current-combined-v1`, commit `3905bbf`.
@@ -95,6 +96,32 @@ cross-fitting constructs the residual targets used for residual-learner
 training. A shuffled-training-residual permutation reference tests whether the
 observed held-out MSE improvement exceeds chance. Record the resulting metrics
 below after the full-cache run.
+
+### 2026-09-02 — prompt-embedding hypothesis
+
+Branch: `experiment/prompt-embedding`
+
+Research question: do outcome-free semantic prompt features explain
+weak/strong disagreement beyond uncertainty and weak-model hidden states, and
+do nonlinear estimators benefit more than logistic regression?
+
+Design:
+
+- frozen default encoder: `sentence-transformers/all-MiniLM-L6-v2`;
+- encoder input: question and labeled choices only;
+- no gold answer, weak/strong answer, response text, or disagreement outcome;
+- raw embedding saved once in an ID-aligned versioned sidecar;
+- fixed transductive outcome-free PCA with 32 components;
+- contexts compared on identical folds: current 78D, prompt 32D, combined 110D;
+- supervised models unchanged from the baseline comparison;
+- incremental diagnostic: current-context logistic base, prompt-only HGB
+  residual learner, nested cross-fitting, and 100 shuffled-training-residual
+  permutations.
+
+Decision rule: prompt information is incrementally useful only if the held-out
+residual MSE improvement is positive and the permutation evidence is credible.
+Whether nonlinear models gain more must be judged from their out-of-fold change
+relative to logistic across the same context and folds.
 
 ## Template for future entries
 
