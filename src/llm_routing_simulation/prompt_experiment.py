@@ -27,7 +27,7 @@ from llm_routing_simulation.skyline import (
 CONTEXT_LABELS = {
     "current": "Current 78D",
     "prompt": "Prompt PCA",
-    "combined": "Current + prompt PCA",
+    "compact": "Uncertainty + prompt PCA",
 }
 
 
@@ -74,6 +74,32 @@ def prompt_pca_context(
         ),
         "whitened": True,
         "featurewise_standardized": True,
+    }
+
+
+def build_context_matrices(
+    current_context: np.ndarray,
+    prompt_context: np.ndarray,
+    uncertainty_dimension: int,
+) -> dict[str, np.ndarray]:
+    """Build the baseline, prompt-only, and compact hybrid contexts."""
+    current = np.asarray(current_context, dtype=np.float64)
+    prompt = np.asarray(prompt_context, dtype=np.float64)
+    if (
+        current.ndim != 2
+        or prompt.ndim != 2
+        or current.shape[0] != prompt.shape[0]
+    ):
+        raise ValueError("Current and prompt contexts must be aligned matrices")
+    if not 1 <= uncertainty_dimension <= current.shape[1]:
+        raise ValueError("Invalid uncertainty feature dimension")
+    compact = np.concatenate(
+        (current[:, :uncertainty_dimension], prompt), axis=1
+    )
+    return {
+        CONTEXT_LABELS["current"]: current,
+        CONTEXT_LABELS["prompt"]: prompt,
+        CONTEXT_LABELS["compact"]: compact,
     }
 
 
@@ -165,7 +191,7 @@ def run_prompt_embedding_experiment(
     cache_path: str | Path,
     prompt_embedding_path: str | Path,
     output_dir: str | Path,
-    prompt_components: int = 32,
+    prompt_components: int = 16,
     requested_folds: int = 5,
     residual_permutations: int = 100,
     seed: int = 0,
@@ -190,15 +216,15 @@ def run_prompt_embedding_experiment(
         raw_prompt_embeddings, prompt_components
     )
     current_context = np.stack([item.context for item in rounds]).astype(np.float64)
-    combined_context = np.concatenate((current_context, prompt_context), axis=1)
+    uncertainty_dimension = int(cache.arrays["uncertainty_features"].shape[1])
     outcomes = np.asarray(
         [item.weak_answer != item.strong_answer for item in rounds], dtype=np.int64
     )
-    context_matrices = {
-        CONTEXT_LABELS["current"]: current_context,
-        CONTEXT_LABELS["prompt"]: prompt_context,
-        CONTEXT_LABELS["combined"]: combined_context,
-    }
+    context_matrices = build_context_matrices(
+        current_context,
+        prompt_context,
+        uncertainty_dimension,
+    )
 
     all_skyline_rows: list[dict] = []
     all_comparison_rows: list[dict] = []
@@ -292,7 +318,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir", type=Path, default=Path("prompt-embedding-results")
     )
-    parser.add_argument("--prompt-components", type=int, default=32)
+    parser.add_argument("--prompt-components", type=int, default=16)
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--residual-permutations", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)

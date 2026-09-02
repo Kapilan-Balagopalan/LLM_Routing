@@ -111,8 +111,10 @@ Design:
 - encoder input: question and labeled choices only;
 - no gold answer, weak/strong answer, response text, or disagreement outcome;
 - raw embedding saved once in an ID-aligned versioned sidecar;
-- fixed transductive outcome-free PCA with 32 components;
-- contexts compared on identical folds: current 78D, prompt 32D, combined 110D;
+- fixed transductive outcome-free PCA with 16 components;
+- contexts compared on identical folds: current 78D, prompt 16D, and compact
+  uncertainty-plus-prompt 30D;
+- the compact hybrid deliberately excludes the 64 hidden-state PCA dimensions;
 - supervised models unchanged from the baseline comparison;
 - incremental diagnostic: current-context logistic base, prompt-only HGB
   residual learner, nested cross-fitting, and 100 shuffled-training-residual

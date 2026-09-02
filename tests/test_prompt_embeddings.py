@@ -13,6 +13,7 @@ from llm_routing_simulation.prompt_embeddings import (
 )
 from llm_routing_simulation.prompt_experiment import (
     align_prompt_embeddings,
+    build_context_matrices,
     prompt_pca_context,
 )
 from llm_routing_simulation.skyline import cross_fitted_residual_predictability
@@ -96,6 +97,15 @@ def test_prompt_pca_is_fixed_size_and_outcome_free():
     assert np.all(np.isfinite(context))
     assert np.allclose(context.mean(axis=0), 0.0, atol=1e-10)
     assert summary["scope"] == "fixed transductive, outcome-free, selected eligible prompts"
+
+
+def test_compact_context_is_14_uncertainty_plus_16_prompt_dimensions():
+    current = np.zeros((20, 78), dtype=np.float64)
+    prompt = np.ones((20, 16), dtype=np.float64)
+    matrices = build_context_matrices(current, prompt, uncertainty_dimension=14)
+    assert matrices["Current 78D"].shape == (20, 78)
+    assert matrices["Prompt PCA"].shape == (20, 16)
+    assert matrices["Uncertainty + prompt PCA"].shape == (20, 30)
 
 
 def test_incremental_residual_test_accepts_separate_prompt_context():

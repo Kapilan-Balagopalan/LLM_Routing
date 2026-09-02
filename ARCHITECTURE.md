@@ -105,10 +105,11 @@ that answer/outcome features were not used.
 
 ### `prompt_experiment.py`
 
-Fits a 32-dimensional fixed transductive outcome-free PCA to prompt embeddings,
-then evaluates current-only, prompt-only, and concatenated contexts on identical
-out-of-fold splits. It also uses prompt features alone to predict residuals from
-the current-context logistic baseline.
+Fits a 16-dimensional fixed transductive outcome-free PCA to prompt embeddings,
+then evaluates the current 78D context, prompt-only 16D context, and compact 30D
+hybrid (14 uncertainty plus 16 prompt features) on identical out-of-fold splits.
+It also uses prompt features alone to predict residuals from the current-context
+logistic baseline.
 
 ## Branch-specific additions
 
