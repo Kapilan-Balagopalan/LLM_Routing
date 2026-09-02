@@ -530,7 +530,7 @@ class XGBoostETCPlayer(HistoryBasedPlayer):
             action, reason = 1, "forced_exploration"
         else:
             action = int(predicted >= self.threshold)
-            reason = f"{self.estimator.estimator_name}_threshold"
+            reason = "xgboost_threshold"
         decision = ETCDecision(
             action=action,
             predicted_disagreement=predicted,
