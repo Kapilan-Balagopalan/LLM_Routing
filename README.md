@@ -18,17 +18,24 @@ python -m venv .venv
 python -m pip install -e ".[test]"
 ```
 
-Copy the downloaded `llm-routing-cache.zip` into this folder. Run every current
-experiment with:
+Copy both `llm-routing-cache.zip` and its aligned `prompt-embeddings.zip`
+sidecar into this folder. Run every current experiment with:
 
 ```powershell
-simulate-llm-routing --cache llm-routing-cache.zip --experiment all
+simulate-llm-routing `
+  --cache llm-routing-cache.zip `
+  --prompt-embeddings prompt-embeddings.zip `
+  --experiment all
 ```
 
 For a quick check, use a prefix:
 
 ```powershell
-simulate-llm-routing --cache llm-routing-cache.zip --experiment skyline --limit 100
+simulate-llm-routing `
+  --cache llm-routing-cache.zip `
+  --prompt-embeddings prompt-embeddings.zip `
+  --experiment skyline `
+  --limit 100
 ```
 
 The useful choices are:
@@ -38,8 +45,8 @@ The useful choices are:
   elastic-net logistic, Extra Trees, calibrated RBF SVM, and—when the
   `benchmark` extra is installed—XGBoost and CatBoost. It also includes the
   analytic random-routing reference.
-- `--experiment online`: ETC, CBPSide, fixed-gamma-32 IGW, and random routing
-  matched to ETC traffic.
+- `--experiment online`: RBF-SVM ETC, logistic CBPSide, fixed-gamma-16
+  RBF-SVM IGW, and random routing matched to ETC traffic.
 - `--experiment all`: both groups (the default).
 
 Results go to `simulation-results/`, including CSV/JSON tables, the full online
@@ -69,42 +76,44 @@ or another nonnegative count to control its precision and runtime.
 
 ## Current defaults
 
-- Context: 14 weak-generation uncertainty features plus the collected fixed PCA
-  projection of five Qwen hidden layers.
+- Context: a fixed 32-dimensional PCA projection of the question-and-choices
+  prompt embedding. Weak-model uncertainty and internal states are not used.
 - Loss values: `l01 = 1.82, 2.22, 2.67, 3.33`, `l11 = 1`.
-- ETC: 100 initial tastes, then a frozen XGBoost estimator.
-- CBPSide: logistic regression with the same class-balanced bootstrap as IGW:
-  force strong routing until 10 agreements and 10 disagreements are observed,
-  capped at 50 tastes. Its additional fixed minimum is zero by default.
-- IGW: online-refitted XGBoost model, `mu = 2`, fixed `gamma = 32`, class
-  bootstrap 10/10 with a
-  maximum of 50 bootstrap tastes, inverse-propensity weights capped at 10.
+- ETC: 300 initial tastes, then a frozen calibrated RBF-SVM estimator.
+- CBPSide: regularized linear logistic regression with no forced tastes and no
+  class bootstrap.
+- IGW: online-refitted calibrated RBF SVM, `mu = 2`, fixed `gamma = 16`, no
+  forced tastes or class bootstrap, and inverse-propensity weights capped at 10.
 - Accuracy: agreement with the strong-model answer, not ARC ground truth.
-- Neural skyline diagnostics: MLP-4 has 321 trainable parameters and MLP-8 has
-  641 for the default 78-dimensional context. They are not used by IGW unless
-  a later out-of-fold result justifies implementing weighted online training.
+- Neural skyline diagnostics remain supervised comparisons and are not used by
+  the online players.
 - Supervised model comparison reports ROC AUC, log loss, Brier score,
   ten-bin calibration error, and routing accuracy at 50% traffic. Install the
   optional tree libraries with `python -m pip install -e ".[benchmark,test]"`.
-- XGBoost is connected to both ETC and IGW after winning the supervised
-  comparison; CBPSide remains logistic. CatBoost, Extra Trees, SVM,
-  elastic-net, and the MLPs remain supervised diagnostics only.
+- RBF SVM is connected to ETC and IGW after outperforming logistic on the 32D
+  prompt-only context; CBPSide remains logistic. The other models remain
+  supervised skyline diagnostics.
 
 Pass alternatives on the command line, for example:
 
 ```powershell
-simulate-llm-routing --cache llm-routing-cache.zip --l01-values 1 2 4 8 --seed 7
+simulate-llm-routing `
+  --cache llm-routing-cache.zip `
+  --prompt-embeddings prompt-embeddings.zip `
+  --l01-values 1 2 4 8 `
+  --seed 7
 ```
 
-To rebuild a lower-dimensional context using the fixed PCA axes saved in the
-cache, add `--pca-components 20` (or another available positive value).
+The prompt dimension defaults to 32 and can be changed explicitly with
+`--prompt-components`, but 32 is the planned configuration for this branch.
 
 ## Prompt-embedding experiment
 
-This branch tests whether question semantics add disagreement-prediction signal
-beyond the current uncertainty and hidden-state context. The cache already
-contains every ARC question and choice, so Qwen and Llama inference is not
-repeated.
+This branch uses question semantics as the complete routing context. The cache
+already contains every ARC question and choice, so Qwen and Llama inference is
+not repeated. The fixed prompt PCA is fit once across all eligible prompts using
+no answers or disagreement outcomes, then the same 32 coordinates are supplied
+to skyline models and every online player.
 
 Install the optional local encoder dependency:
 

@@ -16,10 +16,18 @@ from llm_routing_simulation.algorithm import (
     IGWPlayer,
     LogCBPSideATConfig,
     LogCBPSideATPlayer,
-    XGBoostETCPlayer,
+    RBFSVMETCPlayer,
 )
 from llm_routing_simulation.cache import RoutingCache, load_cache
 from llm_routing_simulation.environment import LLMCascadeEnvironment
+from llm_routing_simulation.prompt_embeddings import (
+    load_prompt_embedding_cache,
+    validate_prompt_embedding_source,
+)
+from llm_routing_simulation.prompt_experiment import (
+    align_prompt_embeddings,
+    prompt_pca_context,
+)
 from llm_routing_simulation.skyline import (
     binary_residual_diagnostics,
     cross_fitted_residual_predictability,
@@ -36,27 +44,29 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cache", required=True, type=Path)
     parser.add_argument(
+        "--prompt-embeddings",
+        type=Path,
+        default=Path("prompt-embeddings.zip"),
+        help="Outcome-free prompt embedding sidecar aligned with the routing cache",
+    )
+    parser.add_argument("--prompt-components", type=int, default=32)
+    parser.add_argument(
         "--experiment", choices=("all", "online", "skyline"), default="all"
     )
     parser.add_argument("--output-dir", type=Path, default=Path("simulation-results"))
     parser.add_argument("--limit", type=int, help="Optional prefix of eligible rows")
     parser.add_argument(
-        "--pca-components",
-        type=int,
-        help="Use this many saved PCA axes; defaults to the collected context",
-    )
-    parser.add_argument(
         "--l01-values", type=float, nargs="+", default=[1.82, 2.22, 2.67, 3.33]
     )
     parser.add_argument("--l11", type=float, default=1.0)
-    parser.add_argument("--etc-tastes", type=int, default=100)
+    parser.add_argument("--etc-tastes", type=int, default=300)
     parser.add_argument("--cbpside-tastes", type=int, default=0)
-    parser.add_argument("--cbpside-bootstrap-per-class", type=int, default=10)
-    parser.add_argument("--cbpside-bootstrap-max-tastes", type=int, default=50)
+    parser.add_argument("--cbpside-bootstrap-per-class", type=int, default=0)
+    parser.add_argument("--cbpside-bootstrap-max-tastes", type=int, default=0)
     parser.add_argument("--igw-min-tastes", type=int, default=0)
-    parser.add_argument("--igw-bootstrap-per-class", type=int, default=10)
-    parser.add_argument("--igw-bootstrap-max-tastes", type=int, default=50)
-    parser.add_argument("--igw-gamma", type=float, default=32.0)
+    parser.add_argument("--igw-bootstrap-per-class", type=int, default=0)
+    parser.add_argument("--igw-bootstrap-max-tastes", type=int, default=0)
+    parser.add_argument("--igw-gamma", type=float, default=16.0)
     parser.add_argument("--igw-mu", type=float, default=2.0)
     parser.add_argument("--igw-min-propensity", type=float, default=0.1)
     parser.add_argument("--random-repeats", type=int, default=100)
@@ -81,6 +91,8 @@ def _jsonable(value: Any) -> Any:
         return value.tolist()
     if isinstance(value, np.generic):
         return value.item()
+    if isinstance(value, Path):
+        return str(value)
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -88,15 +100,40 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def _eligible(cache: RoutingCache, pca_components: int | None, limit: int | None):
-    rounds = cache.eligible_rounds(pca_components)
+def _prompt_context_rounds(
+    cache: RoutingCache,
+    prompt_embedding_path: str | Path,
+    prompt_components: int,
+    limit: int | None,
+):
+    """Attach one fixed outcome-free prompt-PCA context to every round."""
+    rounds = cache.eligible_rounds()
+    embedding_cache = load_prompt_embedding_cache(prompt_embedding_path)
+    validate_prompt_embedding_source(embedding_cache, cache)
+    raw_embeddings = align_prompt_embeddings(rounds, embedding_cache)
+    contexts, pca_summary = prompt_pca_context(
+        raw_embeddings, prompt_components
+    )
     if limit is not None:
         if limit < 1:
             raise ValueError("--limit must be positive")
         rounds = rounds[:limit]
+        contexts = contexts[:limit]
     if not rounds:
         raise ValueError("The cache has no eligible weak/strong answer pairs")
-    return rounds
+    prompt_rounds = [
+        replace(item, context=contexts[index].copy())
+        for index, item in enumerate(rounds)
+    ]
+    return prompt_rounds, {
+        "source": "question and labeled choices only",
+        "embedding_model": embedding_cache.manifest["embedding_model"],
+        "embedding_cache": str(Path(prompt_embedding_path).resolve()),
+        "pca": pca_summary,
+        "context_dimension": int(contexts.shape[1]),
+        "fit_scope": "all eligible prompts before optional experiment limit",
+        "outcome_or_answer_features_used": False,
+    }
 
 
 def _run_one_player(method: str, player, config, rounds, progress_label: str):
@@ -211,7 +248,7 @@ def _random_matched(
 
 
 def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
-    """Run ETC, CBPSide, IGW gamma=32, and matched-random experiments."""
+    """Run RBF-SVM ETC/IGW, logistic CBPSide, and matched random."""
     context_dim = int(rounds[0].context.size)
     rows, trajectories = [], []
     for loss_index, l01 in enumerate(args.l01_values):
@@ -234,7 +271,7 @@ def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
         players = [
             (
                 "ETC",
-                XGBoostETCPlayer(
+                RBFSVMETCPlayer(
                     context_dim, base, seed=args.seed + loss_index
                 ),
                 base,
@@ -421,7 +458,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise SystemExit("Taste and bootstrap settings must be nonnegative")
 
     cache = load_cache(args.cache)
-    rounds = _eligible(cache, args.pca_components, args.limit)
+    rounds, context_summary = _prompt_context_rounds(
+        cache,
+        args.prompt_embeddings,
+        args.prompt_components,
+        args.limit,
+    )
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     print(
@@ -512,6 +554,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "cache_schema_version": cache.manifest["schema_version"],
         "examples": len(rounds),
         "context_dimension": int(rounds[0].context.size),
+        "context": context_summary,
         "routing_reference": "strong_model_answer",
         "experiment": args.experiment,
         "parameters": vars(args) | {"cache": str(args.cache), "output_dir": str(args.output_dir)},

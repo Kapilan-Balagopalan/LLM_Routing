@@ -14,6 +14,8 @@ weak- or strong-model generation is repeated.
 ```text
 llm-routing-cache.zip
     -> cache.py validates records and arrays
+prompt-embeddings.zip
+    -> run.py validates alignment and fits one outcome-free 32D prompt PCA
     -> environment.py emits the current context and weak answer
     -> player.py defines the act-then-update protocol
     -> algorithm.py chooses action 0 or 1 from revealed history
@@ -31,7 +33,7 @@ context, and feedback that the environment actually revealed.
 
 ## Cache and context
 
-The current cache manifest records:
+The current cache manifest records the original weak-model features:
 
 - schema: `llm-routing-cache-v1`;
 - dataset: `allenai/ai2_arc`, `ARC-Easy`, test split;
@@ -47,6 +49,12 @@ The current cache manifest records:
 The 14 uncertainty features contain choice entropy, normalized choice entropy,
 top probability, top-two margin, one-minus-top probability, next-token
 vocabulary entropy, four option probabilities, and four option log likelihoods.
+
+On `experiment/prompt-routing`, those saved 78 features are not exposed to the
+players. `run.py` aligns the outcome-free semantic sidecar by example ID, fits a
+single fixed transductive PCA across all eligible prompts, and replaces every
+round's context with the resulting 32D prompt vector. An optional experiment
+limit is applied only after this fixed projection is constructed.
 
 ## Core modules
 
@@ -72,12 +80,12 @@ It checks that updates correspond to the pending action and context.
 
 ### `algorithm.py`
 
-- `XGBoostETCPlayer`: routes strongly for its exploration period, fits XGBoost
+- `RBFSVMETCPlayer`: routes strongly for 300 rounds, fits a calibrated RBF SVM
   once from revealed feedback, and freezes that estimator.
 - `LogCBPSideATPlayer`: estimates a regularized linear logistic disagreement
-  model and applies the CBPSide confidence rule.
-- `IGWPlayer`: estimates disagreement using weighted XGBoost and samples an arm
-  using inverse-gap weighting.
+  model and applies the CBPSide confidence rule without forced tastes.
+- `IGWPlayer`: estimates disagreement using an online-refitted calibrated RBF
+  SVM and samples an arm using inverse-gap weighting with `mu=2`, `gamma=16`.
 - `RevealedFeedbackEstimator`: extracts only action-1 observations and applies
   capped inverse-propensity weights when supplied.
 
@@ -126,6 +134,8 @@ or environment interfaces.
 - `experiment/prompt-embedding` adds a frozen semantic sidecar, a three-context
   supervised comparison, an incremental prompt-residual test, and a two-stage
   corrected-probability skyline with split-seed stability results.
+- `experiment/prompt-routing` uses the fixed prompt-only 32D context for both
+  supervised skylines and the online routing players.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather
 than inferring research intent from implementation details alone.

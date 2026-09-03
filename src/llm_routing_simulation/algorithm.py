@@ -1,4 +1,4 @@
-"""Online players: XGBoost ETC/IGW and logistic CBPSide."""
+"""Online players: RBF-SVM ETC/IGW and logistic CBPSide."""
 
 from __future__ import annotations
 
@@ -10,19 +10,12 @@ import numpy as np
 from llm_routing_simulation.player import HistoryBasedPlayer, PlayerDecision
 
 
-# This matches the supervised XGBoost model that achieved the strongest
-# out-of-fold AUC. ETC freezes it after exploration, while IGW refits it with
-# inverse-propensity sample weights on revealed outcomes.
-ONLINE_XGBOOST_PROFILE = {
-    "name": "XGBoost",
-    "n_estimators": 300,
-    "max_depth": 3,
-    "learning_rate": 0.03,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "min_child_weight": 10,
-    "reg_lambda": 5.0,
-    "reg_alpha": 0.1,
+ONLINE_RBF_SVM_PROFILE = {
+    "name": "RBF SVM",
+    "C": 1.0,
+    "gamma": "scale",
+    "probability": True,
+    "preprocessing": "training-history StandardScaler",
 }
 
 
@@ -39,7 +32,7 @@ class LogCBPSideATConfig:
     theta_norm_bound: float | None = None
     max_newton_steps: int = 50
     tolerance: float = 1e-8
-    min_tastes: int = 100
+    min_tastes: int = 0
     bootstrap_per_class: int = 0
     bootstrap_max_tastes: int = 0
     use_confidence_bound: bool = True
@@ -369,6 +362,14 @@ class RevealedFeedbackEstimator:
     def _new_model(self):
         raise NotImplementedError
 
+    def _fit_model(
+        self,
+        features: np.ndarray,
+        labels: np.ndarray,
+        sample_weights: np.ndarray,
+    ) -> None:
+        self.model.fit(features, labels, sample_weight=sample_weights)
+
     def transform(self, context: np.ndarray) -> np.ndarray:
         """Select a fixed feature prefix without changing the external context."""
         row = np.asarray(context, dtype=np.float64).reshape(-1)
@@ -444,10 +445,10 @@ class RevealedFeedbackEstimator:
         )
         if should_fit:
             self.model = self._new_model()
-            self.model.fit(
+            self._fit_model(
                 np.stack(revealed_x),
                 np.asarray(revealed_y),
-                sample_weight=weights,
+                weights,
             )
             self.fitted_count = tasted_count
         probability = float(self.model.predict_proba(current[None, :])[0, 1])
@@ -455,37 +456,39 @@ class RevealedFeedbackEstimator:
         return probability, tasted_count, True, classes
 
 
-class XGBoostEstimator(RevealedFeedbackEstimator):
-    """XGBoost disagreement estimator with IGW inverse-propensity weights."""
+class RBFSVMEstimator(RevealedFeedbackEstimator):
+    """Calibrated RBF-SVM disagreement estimator for prompt-PCA contexts."""
 
     @property
     def estimator_name(self) -> str:
-        return "xgboost"
+        return "rbf_svm"
 
     def _new_model(self):
-        try:
-            from xgboost import XGBClassifier
-        except ImportError as exc:
-            raise RuntimeError(
-                "ETC and IGW require XGBoost; reinstall the project dependencies"
-            ) from exc
-        config = {
-            key: value
-            for key, value in ONLINE_XGBOOST_PROFILE.items()
-            if key != "name"
-        }
-        return XGBClassifier(
-            **config,
-            objective="binary:logistic",
-            eval_metric="logloss",
-            random_state=self.seed,
-            n_jobs=1,
-            verbosity=0,
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.svm import SVC
+
+        return make_pipeline(
+            StandardScaler(),
+            SVC(
+                C=ONLINE_RBF_SVM_PROFILE["C"],
+                gamma=ONLINE_RBF_SVM_PROFILE["gamma"],
+                probability=ONLINE_RBF_SVM_PROFILE["probability"],
+                random_state=self.seed,
+            ),
         )
 
+    def _fit_model(
+        self,
+        features: np.ndarray,
+        labels: np.ndarray,
+        sample_weights: np.ndarray,
+    ) -> None:
+        self.model.fit(features, labels, svc__sample_weight=sample_weights)
 
-class XGBoostETCPlayer(HistoryBasedPlayer):
-    """Explore-then-commit using a frozen XGBoost disagreement model."""
+
+class RBFSVMETCPlayer(HistoryBasedPlayer):
+    """Explore-then-commit using a frozen calibrated RBF-SVM model."""
 
     def __init__(
         self,
@@ -498,7 +501,7 @@ class XGBoostETCPlayer(HistoryBasedPlayer):
         super().__init__(context_dim)
         self.config = config
         self.min_tastes = config.min_tastes
-        self.estimator = XGBoostEstimator(
+        self.estimator = RBFSVMEstimator(
             context_dim, max_features=estimator_max_features, seed=seed
         )
         self.last_decision: ETCDecision | None = None
@@ -530,7 +533,7 @@ class XGBoostETCPlayer(HistoryBasedPlayer):
             action, reason = 1, "forced_exploration"
         else:
             action = int(predicted >= self.threshold)
-            reason = "xgboost_threshold"
+            reason = "rbf_svm_threshold"
         decision = ETCDecision(
             action=action,
             predicted_disagreement=predicted,
@@ -588,11 +591,11 @@ class IGWPlayer(HistoryBasedPlayer):
         total_samples: int,
         *,
         min_tastes: int = 0,
-        bootstrap_per_class: int = 10,
-        bootstrap_max_tastes: int = 50,
+        bootstrap_per_class: int = 0,
+        bootstrap_max_tastes: int = 0,
         mu: float = 2.0,
         gamma_multiplier: float = 2.0,
-        fixed_gamma: float | None = None,
+        fixed_gamma: float | None = 16.0,
         min_propensity: float = 0.1,
         estimator_max_features: int | None = None,
         seed: int = 0,
@@ -612,7 +615,7 @@ class IGWPlayer(HistoryBasedPlayer):
                 "IGW requires N>0, min_tastes>=0, mu>=2, positive gamma, "
                 "nonnegative bootstrap settings, and min propensity in (0,1]"
             )
-        self.estimator = XGBoostEstimator(
+        self.estimator = RBFSVMEstimator(
             context_dim, max_features=estimator_max_features, seed=seed
         )
         self.config = config

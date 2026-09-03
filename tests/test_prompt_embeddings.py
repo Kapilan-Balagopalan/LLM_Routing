@@ -18,6 +18,7 @@ from llm_routing_simulation.prompt_experiment import (
     prompt_pca_context,
     summarize_two_stage_seeds,
 )
+from llm_routing_simulation.run import _prompt_context_rounds
 from llm_routing_simulation.skyline import (
     cross_fitted_residual_predictability,
     evaluate_probability_predictions,
@@ -102,6 +103,54 @@ def test_prompt_pca_is_fixed_size_and_outcome_free():
     assert np.all(np.isfinite(context))
     assert np.allclose(context.mean(axis=0), 0.0, atol=1e-10)
     assert summary["scope"] == "fixed transductive, outcome-free, selected eligible prompts"
+
+
+def test_prompt_context_rounds_replace_saved_llm_context_before_limit(tmp_path):
+    records = [
+        {
+            "id": f"arc-{index}",
+            "question": f"Question {index}?",
+            "choices": {"A": "first", "B": "second"},
+            "prompt": f"Cached generation prompt {index}",
+            "weak_answer": "A",
+            "strong_answer": "B" if index % 2 else "A",
+        }
+        for index in range(6)
+    ]
+    cache = RoutingCache(
+        manifest={
+            "schema_version": "llm-routing-cache-v1",
+            "pca_components": 64,
+        },
+        records=records,
+        arrays={
+            "eligible": np.ones(6, dtype=bool),
+            "contexts": np.full((6, 78), 99.0, dtype=np.float64),
+        },
+    )
+    embeddings = np.random.default_rng(12).normal(size=(6, 4))
+    sidecar = tmp_path / "prompt-embeddings.zip"
+    save_prompt_embedding_cache(
+        sidecar,
+        source_cache=cache,
+        embedding_model="fixture-encoder",
+        texts=[build_semantic_prompt(record) for record in records],
+        embeddings=embeddings,
+        normalized=False,
+    )
+
+    rounds, summary = _prompt_context_rounds(
+        cache,
+        sidecar,
+        prompt_components=2,
+        limit=3,
+    )
+    assert len(rounds) == 3
+    assert all(round_.context.shape == (2,) for round_ in rounds)
+    assert all(np.all(np.isfinite(round_.context)) for round_ in rounds)
+    assert summary["context_dimension"] == 2
+    assert summary["outcome_or_answer_features_used"] is False
+    assert summary["fit_scope"] == "all eligible prompts before optional experiment limit"
 
 
 def test_compact_context_is_14_uncertainty_plus_32_prompt_dimensions():

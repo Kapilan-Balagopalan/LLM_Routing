@@ -1,12 +1,12 @@
 import numpy as np
 
 from llm_routing_simulation.algorithm import (
-    ONLINE_XGBOOST_PROFILE,
+    ONLINE_RBF_SVM_PROFILE,
     IGWPlayer,
     LogCBPSideAT,
     LogCBPSideATConfig,
-    XGBoostETCPlayer,
-    XGBoostEstimator,
+    RBFSVMETCPlayer,
+    RBFSVMEstimator,
 )
 from llm_routing_simulation.skyline import (
     HGB_CAPACITY_PROFILES,
@@ -26,25 +26,21 @@ def test_skyline_stops_at_hgb_350():
     assert len(profiles) == 5
 
 
-def test_online_etc_and_igw_use_supervised_xgboost_configuration():
-    assert ONLINE_XGBOOST_PROFILE == {
-        "name": "XGBoost",
-        "n_estimators": 300,
-        "max_depth": 3,
-        "learning_rate": 0.03,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "min_child_weight": 10,
-        "reg_lambda": 5.0,
-        "reg_alpha": 0.1,
+def test_online_etc_and_igw_use_rbf_svm_configuration():
+    assert ONLINE_RBF_SVM_PROFILE == {
+        "name": "RBF SVM",
+        "C": 1.0,
+        "gamma": "scale",
+        "probability": True,
+        "preprocessing": "training-history StandardScaler",
     }
     config = LogCBPSideATConfig()
-    etc = XGBoostETCPlayer(8, config)
-    igw = IGWPlayer(8, config, 100, fixed_gamma=32.0)
-    assert isinstance(etc.estimator, XGBoostEstimator)
-    assert etc.estimator.estimator_name == "xgboost"
-    assert isinstance(igw.estimator, XGBoostEstimator)
-    assert igw.estimator.estimator_name == "xgboost"
+    etc = RBFSVMETCPlayer(8, config)
+    igw = IGWPlayer(8, config, 100, fixed_gamma=16.0)
+    assert isinstance(etc.estimator, RBFSVMEstimator)
+    assert etc.estimator.estimator_name == "rbf_svm"
+    assert isinstance(igw.estimator, RBFSVMEstimator)
+    assert igw.estimator.estimator_name == "rbf_svm"
 
 
 def test_cbpside_class_bootstrap_until_balanced_or_capped():
@@ -67,13 +63,17 @@ def test_cbpside_class_bootstrap_until_balanced_or_capped():
 
 def test_online_exploration_defaults():
     args = _parser().parse_args(["--cache", "fixture.zip"])
-    assert args.etc_tastes == 100
+    assert args.prompt_embeddings.name == "prompt-embeddings.zip"
+    assert args.prompt_components == 32
+    assert args.etc_tastes == 300
     assert args.cbpside_tastes == 0
-    assert args.cbpside_bootstrap_per_class == 10
-    assert args.cbpside_bootstrap_max_tastes == 50
+    assert args.cbpside_bootstrap_per_class == 0
+    assert args.cbpside_bootstrap_max_tastes == 0
     assert args.igw_min_tastes == 0
-    assert args.igw_bootstrap_per_class == 10
-    assert args.igw_bootstrap_max_tastes == 50
+    assert args.igw_bootstrap_per_class == 0
+    assert args.igw_bootstrap_max_tastes == 0
+    assert args.igw_mu == 2.0
+    assert args.igw_gamma == 16.0
     assert args.residual_permutations == 100
 
 
