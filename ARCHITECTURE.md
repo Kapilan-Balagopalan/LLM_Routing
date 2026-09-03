@@ -100,10 +100,12 @@ The `analyze-holdout-residuals` entry point reads schema-v2 manifest block
 boundaries and uses one stratified 50/50 split across all eligible rows. It
 compares validation-set binned logistic residuals for the combined uncertainty
 and hidden-state blocks, the prompt-only block, and fake labels produced by a
-probabilistic depth-two decision-tree teacher. Its thresholds are training-set
-feature medians, while alternating near-deterministic leaf probabilities create
-a strong gated interaction. Its Bernoulli labels are generated without real
-outcomes or validation information. No ARC gold answers are used.
+balanced probabilistic depth-four decision-tree teacher. Fifteen training-set
+quantile splits of prompt PC1 create 16 similarly supported leaves. Locally
+alternating probabilities over an increasing global trend create a nonlinear
+step function intended to remain visible after binning by the fitted logistic
+probability. Bernoulli labels are generated without real outcomes or validation
+information. No ARC gold answers are used.
 
 The diagnostic uses approximately equal-size bins ordered by validation
 predicted probability, with `round(sqrt(n_validation))` bins. It saves

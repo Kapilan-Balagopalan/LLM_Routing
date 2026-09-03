@@ -9,6 +9,7 @@ dist/
 .env.*
 *.zip
 *-results/
+holdout-residual-results-strong/
 llm-routing-cache.zip
 simulation-results/
 synthetic-nonlinear-results/

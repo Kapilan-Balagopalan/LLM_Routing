@@ -211,8 +211,82 @@ analyze-holdout-residuals `
 ```
 
 The earlier 80/20 result remains part of the experiment history and should not
-be overwritten. No revised numerical conclusion is recorded until this command
-is run.
+be overwritten. Results are recorded in the following entry.
+
+### 2026-09-03 — Stronger depth-two synthetic-tree result
+
+The 50/50 run used 2,569 rows in each split and 51 probability bins. Validation
+results for uncertainty-plus-hidden, prompt-only, and synthetic-tree labels
+respectively were: AUC `[0.6455, 0.5839, 0.8619]`, log loss
+`[0.6528, 0.6706, 0.4741]`, and Brier score `[0.2293, 0.2389, 0.1523]`.
+Each real-label plot had 6/51 unadjusted intervals excluding zero, while the
+synthetic plot had 9/51.
+
+All four synthetic generating-leaf intervals excluded zero. Their mean
+residuals were `[-0.2174, +0.3872, +0.2037, -0.1932]`, confirming strong
+conditional misspecification. However, most fitted-probability-bin intervals
+still included zero because bins continued to mix tree regions with opposing
+residual signs.
+
+Artifact location:
+`holdout-residual-results-strong/holdout-residual-results.zip`.
+
+### 2026-09-03 — Depth-four probability-visible synthetic design
+
+Motivation: make the known nonlinearity easier to see directly in residual bins
+ordered by the fitted logistic probability, rather than relying primarily on
+generating-leaf groups.
+
+Revised teacher:
+
+- a balanced depth-four tree with 15 internal nodes and 16 leaves;
+- all splits use prompt PC1 at training quantiles `1/16` through `15/16`, giving
+  every training leaf similar support;
+- leaf probabilities are
+  `[0.02, 0.55, 0.05, 0.65, 0.10, 0.75, 0.15, 0.85, 0.20, 0.90, 0.30, 0.95, 0.45, 0.98, 0.65, 0.99]`;
+- the global trend is increasing so logistic produces a useful probability
+  range, while large local reversals create an unrepresentable step pattern;
+- the 50/50 split, 51 probability bins, label seed 10000, and absence of real
+  outcomes from synthetic generation remain unchanged.
+
+Planned command:
+
+```powershell
+analyze-holdout-residuals `
+  --cache llm-routing-cache-full.zip `
+  --output-dir holdout-residual-depth4-results `
+  --validation-fraction 0.5 `
+  --seed 0
+```
+
+The probability-binned plot is still a calibration diagnostic rather than a
+complete test of `E[Y-p(X)|X]=0`; the larger teacher is designed to improve its
+visibility, not to change that interpretation.
+
+### 2026-09-03 — Depth-four synthetic-tree result
+
+The depth-four 50/50 run completed with 2,569 rows in each split and 51
+probability bins. The synthetic-label logistic model obtained validation AUC
+`0.7212`, log loss `0.6098`, Brier score `0.2119`, and accuracy `0.6551`.
+
+The larger tree did not make the misspecification clearer in bins ordered by
+the fitted logistic probability: 6/51 unadjusted 95% intervals excluded zero,
+compared with 9/51 for the stronger depth-two teacher. Its maximum absolute
+probability-bin mean residual also decreased from approximately `0.230` to
+`0.169`. Thus, increasing tree size alone does not prevent fitted-probability
+bins from mixing observations with opposing conditional residuals.
+
+In contrast, all 16 generating-leaf intervals excluded zero. Leaf mean
+residuals alternated in sign and ranged from `-0.367` to `+0.340`, showing that
+the constructed outcome is strongly nonlinear despite the muted
+probability-binned plot. This result reinforces the distinction between
+calibration conditional on the student's fitted score and misspecification
+conditional on an input feature. A follow-up intended to display the known
+nonlinearity without tree-leaf labels should bin residuals by prompt PC1, the
+feature used by the teacher, rather than by fitted probability.
+
+Artifact location:
+`holdout-residual-depth4-results/holdout-residual-results.zip`.
 
 ## Template for future entries
 
