@@ -134,7 +134,8 @@ simulate-prompt-embedding-context `
   --cache llm-routing-cache.zip `
   --prompt-embeddings prompt-embeddings.zip `
   --prompt-components 32 `
-  --residual-permutations 100
+  --residual-permutations 100 `
+  --robustness-seeds 5
 ```
 
 It uses identical folds to compare the current 78-dimensional context, the
@@ -143,6 +144,14 @@ from 14 uncertainty features plus the 32 prompt features. The 64-dimensional
 weak-model hidden-state PCA is deliberately excluded from the compact hybrid.
 It also directly tests whether prompt features predict held-out residuals from
 the current logistic model. Prompt PCA is fixed, transductive, and outcome-free.
+The nested cross-fitted two-stage diagnostic adds the predicted prompt residual
+to the current-context logistic probability, clips the result to a valid
+probability, and compares it with the base probability on AUC, log loss, Brier
+score, 50% routing accuracy, and the full routing skyline. By default it repeats
+the cross-fitting with five consecutive split seeds; only the primary seed runs
+the permutation test. These repeated seeds measure split stability on the same
+data, not performance on independent datasets. This remains a supervised
+diagnostic and is not used by the online routing players.
 Results are written to `prompt-embedding-results/` and bundled as
 `prompt-embedding-results.zip`. The prompt-component count remains configurable.
 The initial primary run used 16 components; 32 is a documented sensitivity run
@@ -159,6 +168,6 @@ motivated by the initial PCA retaining only 37.05% of embedding variance.
 - `src/llm_routing_simulation/prompt_embeddings.py`: outcome-free prompt text,
   frozen encoding, and portable sidecar validation.
 - `src/llm_routing_simulation/prompt_experiment.py`: three-context supervised
-  comparison and incremental prompt-residual test.
+  comparison, incremental prompt-residual test, and two-stage stability check.
 
 Run tests with `python -m pytest`.

@@ -150,6 +150,43 @@ def _routing_accuracy_at_rate(
     return float(np.mean((outcomes == 0) | routed))
 
 
+def evaluate_probability_predictions(
+    probabilities: np.ndarray,
+    outcomes: np.ndarray,
+) -> dict:
+    """Evaluate held-out disagreement probabilities with common diagnostics."""
+    try:
+        from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
+    except ImportError as exc:
+        raise RuntimeError(
+            "Probability evaluation requires the project's scikit-learn dependency"
+        ) from exc
+
+    scores = np.asarray(probabilities, dtype=np.float64).reshape(-1)
+    labels = np.asarray(outcomes, dtype=np.int64).reshape(-1)
+    if scores.size == 0 or scores.size != labels.size:
+        raise ValueError("Probabilities and outcomes must be nonempty and aligned")
+    if not np.all(np.isfinite(scores)) or np.any((scores < 0) | (scores > 1)):
+        raise ValueError("Every probability must be finite and in [0, 1]")
+    if np.any((labels != 0) & (labels != 1)):
+        raise ValueError("Every outcome must be binary")
+    if np.unique(labels).size < 2:
+        raise ValueError("Probability evaluation requires both outcome classes")
+
+    clipped = np.clip(scores, 1e-7, 1.0 - 1e-7)
+    return {
+        "roc_auc": float(roc_auc_score(labels, scores)),
+        "log_loss": float(log_loss(labels, clipped)),
+        "brier_score": float(brier_score_loss(labels, scores)),
+        "expected_calibration_error_10_bins": _expected_calibration_error(
+            scores, labels
+        ),
+        "routing_accuracy_at_50_percent": _routing_accuracy_at_rate(
+            scores, labels, 0.5
+        ),
+    }
+
+
 def random_routing_reference(
     baseline_agreement: float, *, point_count: int = 101
 ) -> list[dict]:

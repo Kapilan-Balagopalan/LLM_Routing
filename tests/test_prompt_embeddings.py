@@ -14,9 +14,14 @@ from llm_routing_simulation.prompt_embeddings import (
 from llm_routing_simulation.prompt_experiment import (
     align_prompt_embeddings,
     build_context_matrices,
+    evaluate_two_stage_correction,
     prompt_pca_context,
+    summarize_two_stage_seeds,
 )
-from llm_routing_simulation.skyline import cross_fitted_residual_predictability
+from llm_routing_simulation.skyline import (
+    cross_fitted_residual_predictability,
+    evaluate_probability_predictions,
+)
 
 
 def _routing_cache():
@@ -130,4 +135,76 @@ def test_incremental_residual_test_accepts_separate_prompt_context():
         summary["mse_improvement"] > 0.0
         and summary["permutation_p_value_one_sided"] is not None
         and summary["permutation_p_value_one_sided"] <= 0.05
+    )
+
+
+def test_two_stage_correction_uses_aligned_clipped_probabilities():
+    rows = [
+        {
+            "example_index": 1,
+            "observed_disagreement": 1,
+            "logistic_probability": 0.7,
+            "predicted_logistic_residual": 0.4,
+        },
+        {
+            "example_index": 0,
+            "observed_disagreement": 0,
+            "logistic_probability": 0.2,
+            "predicted_logistic_residual": -0.1,
+        },
+        {
+            "example_index": 3,
+            "observed_disagreement": 1,
+            "logistic_probability": 0.6,
+            "predicted_logistic_residual": 0.1,
+        },
+        {
+            "example_index": 2,
+            "observed_disagreement": 0,
+            "logistic_probability": 0.65,
+            "predicted_logistic_residual": -0.45,
+        },
+    ]
+    corrected, outcomes, summary = evaluate_two_stage_correction(rows)
+    assert np.array_equal(outcomes, [0, 1, 0, 1])
+    assert np.allclose(corrected, [0.1, 1.0 - 1e-7, 0.2, 0.7])
+    assert summary["corrected_metrics"]["brier_score"] < summary["base_metrics"][
+        "brier_score"
+    ]
+    assert summary["improves_all_auc_logloss_brier"]
+
+
+def test_probability_metrics_and_seed_stability_summary():
+    metrics = evaluate_probability_predictions(
+        np.asarray([0.1, 0.8, 0.2, 0.9]),
+        np.asarray([0, 1, 0, 1]),
+    )
+    assert metrics["roc_auc"] == 1.0
+    assert metrics["routing_accuracy_at_50_percent"] == 1.0
+
+    rows = [
+        {
+            "seed": 2,
+            "delta_roc_auc": 0.01,
+            "delta_log_loss": -0.02,
+            "delta_brier_score": -0.01,
+            "delta_routing_accuracy_at_50_percent": 0.02,
+            "improves_all_auc_logloss_brier": True,
+        },
+        {
+            "seed": 3,
+            "delta_roc_auc": -0.01,
+            "delta_log_loss": 0.01,
+            "delta_brier_score": 0.01,
+            "delta_routing_accuracy_at_50_percent": 0.0,
+            "improves_all_auc_logloss_brier": False,
+        },
+    ]
+    summary = summarize_two_stage_seeds(rows)
+    assert summary["seeds"] == [2, 3]
+    assert summary["seeds_improving_auc"] == 1
+    assert summary["seeds_improving_all_auc_logloss_brier"] == 1
+    assert np.isclose(
+        summary["aggregate_deltas_corrected_minus_base"]["delta_roc_auc"]["mean"],
+        0.0,
     )

@@ -109,7 +109,11 @@ Fits a 32-dimensional fixed transductive outcome-free PCA to prompt embeddings,
 then evaluates the current 78D context, prompt-only 32D context, and compact 46D
 hybrid (14 uncertainty plus 32 prompt features) on identical out-of-fold splits.
 It also uses prompt features alone to predict residuals from the current-context
-logistic baseline.
+logistic baseline. A separate nested cross-fitted diagnostic adds that predicted
+residual to the base probability and evaluates the corrected probability on
+classification metrics and a routing skyline. Multiple split seeds quantify
+cross-validation sensitivity; this diagnostic does not alter the online player
+or environment interfaces.
 
 ## Branch-specific additions
 
@@ -120,7 +124,8 @@ logistic baseline.
   residual tables plus binned residual plots for logistic, selected HGB, and
   selected MLP models.
 - `experiment/prompt-embedding` adds a frozen semantic sidecar, a three-context
-  supervised comparison, and an incremental prompt-residual test.
+  supervised comparison, an incremental prompt-residual test, and a two-stage
+  corrected-probability skyline with split-seed stability results.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather
 than inferring research intent from implementation details alone.

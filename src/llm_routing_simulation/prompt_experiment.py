@@ -18,9 +18,11 @@ from llm_routing_simulation.prompt_embeddings import (
 )
 from llm_routing_simulation.skyline import (
     cross_fitted_residual_predictability,
+    evaluate_probability_predictions,
     fit_supervised_skylines,
     plot_residual_predictability,
     random_routing_reference,
+    threshold_skyline,
 )
 
 
@@ -175,6 +177,152 @@ def _plot_model_comparison(output_path: Path, comparison_rows: list[dict]) -> No
     plt.close(figure)
 
 
+def evaluate_two_stage_correction(
+    residual_rows: list[dict],
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Evaluate base plus residual predictions from one nested cross-fit."""
+    if not residual_rows:
+        raise ValueError("Residual rows must be nonempty")
+    ordered = sorted(residual_rows, key=lambda row: int(row["example_index"]))
+    indices = [int(row["example_index"]) for row in ordered]
+    if indices != list(range(len(ordered))):
+        raise ValueError("Residual rows must contain each example index exactly once")
+
+    outcomes = np.asarray(
+        [row["observed_disagreement"] for row in ordered], dtype=np.int64
+    )
+    base = np.asarray(
+        [row["logistic_probability"] for row in ordered], dtype=np.float64
+    )
+    correction = np.asarray(
+        [row["predicted_logistic_residual"] for row in ordered],
+        dtype=np.float64,
+    )
+    corrected = np.clip(base + correction, 1e-7, 1.0 - 1e-7)
+    base_metrics = evaluate_probability_predictions(base, outcomes)
+    corrected_metrics = evaluate_probability_predictions(corrected, outcomes)
+    deltas = {
+        key: float(corrected_metrics[key] - base_metrics[key])
+        for key in base_metrics
+    }
+    summary = {
+        "construction": (
+            "clip(cross-fitted current-context logistic probability + "
+            "cross-fitted prompt-HGB predicted residual, 1e-7, 1 - 1e-7)"
+        ),
+        "base_model": "Current 78D logistic (nested cross-fitted)",
+        "correction_model": "Prompt PCA HGB residual regressor (nested cross-fitted)",
+        "base_metrics": base_metrics,
+        "corrected_metrics": corrected_metrics,
+        "corrected_minus_base": deltas,
+        "improves_auc": bool(deltas["roc_auc"] > 0.0),
+        "improves_log_loss": bool(deltas["log_loss"] < 0.0),
+        "improves_brier": bool(deltas["brier_score"] < 0.0),
+        "improves_all_auc_logloss_brier": bool(
+            deltas["roc_auc"] > 0.0
+            and deltas["log_loss"] < 0.0
+            and deltas["brier_score"] < 0.0
+        ),
+    }
+    return corrected, outcomes, summary
+
+
+def summarize_two_stage_seeds(seed_rows: list[dict]) -> dict:
+    """Summarize repeated split seeds without treating them as new datasets."""
+    if not seed_rows:
+        raise ValueError("At least one seed result is required")
+    delta_keys = [
+        "delta_roc_auc",
+        "delta_log_loss",
+        "delta_brier_score",
+        "delta_routing_accuracy_at_50_percent",
+    ]
+    aggregate = {}
+    for key in delta_keys:
+        values = np.asarray([row[key] for row in seed_rows], dtype=np.float64)
+        aggregate[key] = {
+            "mean": float(np.mean(values)),
+            "standard_deviation": float(np.std(values, ddof=0)),
+            "minimum": float(np.min(values)),
+            "maximum": float(np.max(values)),
+        }
+    return {
+        "seeds": [int(row["seed"]) for row in seed_rows],
+        "split_repetitions": len(seed_rows),
+        "aggregate_deltas_corrected_minus_base": aggregate,
+        "seeds_improving_auc": int(
+            sum(row["delta_roc_auc"] > 0.0 for row in seed_rows)
+        ),
+        "seeds_improving_log_loss": int(
+            sum(row["delta_log_loss"] < 0.0 for row in seed_rows)
+        ),
+        "seeds_improving_brier": int(
+            sum(row["delta_brier_score"] < 0.0 for row in seed_rows)
+        ),
+        "seeds_improving_all_auc_logloss_brier": int(
+            sum(row["improves_all_auc_logloss_brier"] for row in seed_rows)
+        ),
+        "interpretation": (
+            "Repeated seeds measure sensitivity to cross-validation splits on the "
+            "same dataset; they are not independent replications or a final test set."
+        ),
+    }
+
+
+def _plot_two_stage_skyline(
+    output_path: Path,
+    baseline_rows: list[dict],
+    corrected_rows: list[dict],
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    selected_names = {
+        "Logistic (out-of-fold)",
+        "XGBoost (out-of-fold)",
+        "Random routing (expected)",
+    }
+    selected = [
+        row
+        for row in baseline_rows
+        if row["context"] == CONTEXT_LABELS["current"]
+        and row["model"] in selected_names
+    ]
+    selected.extend({"context": "Two-stage", **row} for row in corrected_rows)
+    styles = {
+        "Logistic (out-of-fold)": ("#2563eb", "--"),
+        "XGBoost (out-of-fold)": ("#16a34a", ":"),
+        "Random routing (expected)": ("#6b7280", "--"),
+        "Two-stage logistic + prompt residual": ("#dc2626", "-"),
+    }
+    figure, axis = plt.subplots(figsize=(7.5, 5.5), constrained_layout=True)
+    for name in styles:
+        rows = [row for row in selected if row["model"] == name]
+        if not rows:
+            continue
+        rows.sort(key=lambda row: row["routing_rate"])
+        color, line_style = styles[name]
+        axis.plot(
+            [row["routing_rate"] for row in rows],
+            [row["accuracy"] for row in rows],
+            label=name.replace(" (out-of-fold)", ""),
+            color=color,
+            linestyle=line_style,
+            linewidth=2.2,
+        )
+    axis.set_xlim(0.0, 1.0)
+    axis.set_ylim(0.0, 1.0)
+    axis.set_xlabel("Strong-model routing rate")
+    axis.set_ylabel("Accuracy under cached strong-answer reference")
+    axis.set_title("Nested cross-fitted two-stage routing skyline")
+    axis.grid(alpha=0.2)
+    axis.legend(fontsize=8)
+    figure.savefig(output_path, dpi=180)
+    plt.close(figure)
+
+
 def _bundle(output_dir: Path) -> Path:
     destination = output_dir / "prompt-embedding-results.zip"
     with zipfile.ZipFile(
@@ -194,12 +342,16 @@ def run_prompt_embedding_experiment(
     prompt_components: int = 32,
     requested_folds: int = 5,
     residual_permutations: int = 100,
+    robustness_seeds: int = 5,
     seed: int = 0,
     limit: int | None = None,
 ) -> Path:
     """Run three supervised contexts and the incremental prompt residual test."""
-    if requested_folds < 2 or residual_permutations < 0:
-        raise ValueError("folds must be >= 2 and residual permutations nonnegative")
+    if requested_folds < 2 or residual_permutations < 0 or robustness_seeds < 1:
+        raise ValueError(
+            "folds must be >= 2, residual permutations nonnegative, and "
+            "robustness seeds positive"
+        )
     cache = load_cache(cache_path)
     rounds = cache.eligible_rounds()
     if limit is not None:
@@ -262,6 +414,92 @@ def run_prompt_embedding_experiment(
         requested_folds=requested_folds,
         permutation_repeats=residual_permutations,
     )
+    corrected_probabilities, corrected_outcomes, two_stage_primary = (
+        evaluate_two_stage_correction(residual_rows)
+    )
+    two_stage_skyline = threshold_skyline(
+        corrected_probabilities,
+        corrected_outcomes,
+        "Two-stage logistic + prompt residual",
+        fit_scope="nested_cross_fitted",
+        evaluation_auc=two_stage_primary["corrected_metrics"]["roc_auc"],
+        folds=residual_summary["outer_folds"],
+        configuration={
+            "base": two_stage_primary["base_model"],
+            "correction": two_stage_primary["correction_model"],
+        },
+        selected=True,
+    )
+
+    two_stage_seed_rows = []
+    for split_seed in range(seed, seed + robustness_seeds):
+        if split_seed == seed:
+            seed_residual_rows = residual_rows
+            seed_residual_summary = residual_summary
+            seed_two_stage = two_stage_primary
+        else:
+            seed_residual_rows, _, _, seed_residual_summary = (
+                cross_fitted_residual_predictability(
+                    current_context,
+                    outcomes,
+                    residual_contexts=prompt_context,
+                    base_context_label=CONTEXT_LABELS["current"],
+                    residual_context_label=CONTEXT_LABELS["prompt"],
+                    seed=split_seed,
+                    requested_folds=requested_folds,
+                    permutation_repeats=0,
+                )
+            )
+            _, _, seed_two_stage = evaluate_two_stage_correction(
+                seed_residual_rows
+            )
+        base_metrics = seed_two_stage["base_metrics"]
+        corrected_metrics = seed_two_stage["corrected_metrics"]
+        deltas = seed_two_stage["corrected_minus_base"]
+        two_stage_seed_rows.append(
+            {
+                "seed": split_seed,
+                "examples": len(rounds),
+                "base_roc_auc": base_metrics["roc_auc"],
+                "corrected_roc_auc": corrected_metrics["roc_auc"],
+                "delta_roc_auc": deltas["roc_auc"],
+                "base_log_loss": base_metrics["log_loss"],
+                "corrected_log_loss": corrected_metrics["log_loss"],
+                "delta_log_loss": deltas["log_loss"],
+                "base_brier_score": base_metrics["brier_score"],
+                "corrected_brier_score": corrected_metrics["brier_score"],
+                "delta_brier_score": deltas["brier_score"],
+                "base_routing_accuracy_at_50_percent": base_metrics[
+                    "routing_accuracy_at_50_percent"
+                ],
+                "corrected_routing_accuracy_at_50_percent": corrected_metrics[
+                    "routing_accuracy_at_50_percent"
+                ],
+                "delta_routing_accuracy_at_50_percent": deltas[
+                    "routing_accuracy_at_50_percent"
+                ],
+                "residual_mse_improvement": seed_residual_summary[
+                    "mse_improvement"
+                ],
+                "residual_correlation": seed_residual_summary[
+                    "residual_correlation"
+                ],
+                "improves_all_auc_logloss_brier": seed_two_stage[
+                    "improves_all_auc_logloss_brier"
+                ],
+            }
+        )
+    two_stage_stability = summarize_two_stage_seeds(two_stage_seed_rows)
+    two_stage_summary = {
+        "primary_seed": seed,
+        "primary_seed_evaluation": two_stage_primary,
+        "primary_seed_residual_permutation_test": residual_summary,
+        "split_seed_stability": two_stage_stability,
+        "scope_warning": (
+            "This is a supervised nested cross-fitted diagnostic. It does not "
+            "replace or evaluate the partial-feedback online routing players."
+        ),
+    }
 
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -270,8 +508,13 @@ def run_prompt_embedding_experiment(
     _write_csv(output / "prompt_incremental_residuals.csv", residual_rows)
     _write_csv(output / "prompt_incremental_residual_bins.csv", residual_bin_rows)
     _write_csv(output / "prompt_incremental_permutations.csv", permutation_rows)
+    _write_csv(output / "two_stage_seed_results.csv", two_stage_seed_rows)
+    _write_csv(output / "two_stage_skyline.csv", two_stage_skyline)
     (output / "prompt_incremental_residual_summary.json").write_text(
         json.dumps(residual_summary, indent=2), encoding="utf-8"
+    )
+    (output / "two_stage_summary.json").write_text(
+        json.dumps(two_stage_summary, indent=2), encoding="utf-8"
     )
     summary = {
         "cache": str(Path(cache_path).resolve()),
@@ -289,9 +532,11 @@ def run_prompt_embedding_experiment(
             for label, matrix in context_matrices.items()
         },
         "incremental_prompt_residual_test": residual_summary,
+        "two_stage_cross_fitted_evaluation": two_stage_summary,
         "seed": seed,
         "folds": requested_folds,
         "residual_permutations": residual_permutations,
+        "robustness_seeds": robustness_seeds,
     }
     (output / "summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
@@ -305,6 +550,11 @@ def run_prompt_embedding_experiment(
         residual_bin_rows,
         permutation_rows,
         residual_summary,
+    )
+    _plot_two_stage_skyline(
+        output / "two_stage_skyline.png",
+        all_skyline_rows,
+        two_stage_skyline,
     )
     return _bundle(output)
 
@@ -321,6 +571,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt-components", type=int, default=32)
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--residual-permutations", type=int, default=100)
+    parser.add_argument(
+        "--robustness-seeds",
+        type=int,
+        default=5,
+        help="Consecutive cross-validation split seeds for the two-stage check",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--limit", type=int)
     return parser
@@ -335,6 +591,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         prompt_components=args.prompt_components,
         requested_folds=args.folds,
         residual_permutations=args.residual_permutations,
+        robustness_seeds=args.robustness_seeds,
         seed=args.seed,
         limit=args.limit,
     )

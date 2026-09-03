@@ -173,6 +173,48 @@ replacement online context. Next evaluate the cross-fitted two-stage predictor
 log loss, Brier score, and routing skyline, then repeat across multiple split
 seeds before changing an online player.
 
+### 2026-09-02 — Two-stage prompt residual evaluation implementation
+
+Branch: `experiment/prompt-embedding`
+
+Implemented the planned nested cross-fitted evaluation. For each held-out row,
+the diagnostic computes
+`clip(current logistic probability + predicted prompt residual, 1e-7, 1-1e-7)`.
+It reports base and corrected AUC, log loss, Brier score, 10-bin ECE, 50% routing
+accuracy, a routing skyline, and per-seed deltas. The default five consecutive
+split seeds reuse the same dataset and therefore assess split stability rather
+than independent replication. Only the primary seed runs the configured
+permutation reference. The online ETC, CBPSide, IGW, and random players remain
+unchanged pending empirical evidence from this diagnostic.
+
+Full cached-data command:
+
+```powershell
+simulate-prompt-embedding-context `
+  --cache llm-routing-cache.zip `
+  --prompt-embeddings prompt-embeddings.zip `
+  --output-dir two-stage-evaluation-results `
+  --prompt-components 32 `
+  --folds 5 `
+  --residual-permutations 100 `
+  --robustness-seeds 5 `
+  --seed 0
+```
+
+On the primary split, the correction changed AUC from 0.66464 to 0.66920,
+log loss from 0.63509 to 0.63422, Brier score from 0.22277 to 0.22218, and
+50% routing accuracy from 0.84602 to 0.85283. Across seeds 0--4, mean AUC
+change was +0.00197, mean log-loss change was +0.00022, mean Brier change was
++0.00014, and mean 50% routing-accuracy change was +0.00136. AUC improved in
+4/5 seeds, while AUC, log loss, and Brier all improved together in 3/5 seeds.
+
+Conclusion: prompt semantics provide modest incremental ranking information,
+but the direct additive probability correction is not sufficiently stable to
+replace an online estimator. Keep it as a supervised diagnostic. Result files
+are `two_stage_summary.json`, `two_stage_seed_results.csv`,
+`two_stage_skyline.csv`, and `two_stage_skyline.png` under
+`two-stage-evaluation-results/`.
+
 ## Template for future entries
 
 ```text
