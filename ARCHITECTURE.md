@@ -97,17 +97,19 @@ full online trajectories, plots, and a ZIP bundle.
 ### `residual_experiment.py`
 
 The `analyze-holdout-residuals` entry point reads schema-v2 manifest block
-boundaries and uses one stratified 80/20 split across all eligible rows. It
+boundaries and uses one stratified 50/50 split across all eligible rows. It
 compares validation-set binned logistic residuals for the combined uncertainty
 and hidden-state blocks, the prompt-only block, and fake labels produced by a
 probabilistic depth-two decision-tree teacher. Its thresholds are training-set
-feature medians, and its Bernoulli labels are generated without real outcomes
-or validation information. No ARC gold answers are used.
+feature medians, while alternating near-deterministic leaf probabilities create
+a strong gated interaction. Its Bernoulli labels are generated without real
+outcomes or validation information. No ARC gold answers are used.
 
 The diagnostic uses approximately equal-size bins ordered by validation
 predicted probability, with `round(sqrt(n_validation))` bins. It saves
 pointwise raw, Pearson, and deviance residuals, bin means and intervals, tree
-leaf summaries, plots, metadata, and a ZIP bundle.
+leaf summaries with intervals, separate probability-bin and tree-leaf plots,
+metadata, and a ZIP bundle.
 
 ## Branch-specific additions
 
@@ -116,7 +118,7 @@ leaf summaries, plots, metadata, and a ZIP bundle.
   `P(Y=1|X)=sigmoid(x1*x2)`.
 - `experiment/residual-diagnostics` adds out-of-fold raw, Pearson, and deviance
   residual tables plus binned residual plots for logistic, selected HGB, and
-  selected MLP models. It also contains the separate schema-v2 4:1 holdout
+  selected MLP models. It also contains the separate schema-v2 1:1 holdout
   comparison across uncertainty+hidden, prompt-only, and tree-generated-label
   settings.
 

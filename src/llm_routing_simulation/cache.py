@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from llm_routing_simulation import CACHE_SCHEMA_VERSION
+from llm_routing_simulation import CACHE_SCHEMA_VERSIONS
 from llm_routing_simulation.environment import CascadeRound
 
 
@@ -41,6 +41,27 @@ class RoutingCache:
         raw_mean, raw_scale = raw.mean(axis=0), raw.std(axis=0)
         raw_scale[raw_scale < 1e-8] = 1.0
         return (raw - raw_mean) / raw_scale
+
+    def context_block(self, name: str) -> tuple[np.ndarray, dict]:
+        """Select a complete context block using manifest-defined boundaries."""
+        blocks = self.manifest.get("context_blocks")
+        if not isinstance(blocks, list):
+            raise ValueError("Cache manifest does not define context_blocks")
+        matches = [block for block in blocks if block.get("name") == name]
+        if len(matches) != 1:
+            raise ValueError(f"Expected exactly one context block named {name!r}")
+        block = matches[0]
+        start, stop = int(block["start"]), int(block["stop"])
+        contexts = np.asarray(self.arrays["contexts"], dtype=np.float64)
+        if contexts.ndim != 2 or not 0 <= start < stop <= contexts.shape[1]:
+            raise ValueError(f"Invalid manifest range for context block {name!r}")
+        metadata = {
+            "name": name,
+            "start": start,
+            "stop": stop,
+            "components": stop - start,
+        }
+        return contexts[:, start:stop], metadata
 
     def eligible_rounds(self, pca_components: int | None = None) -> list[CascadeRound]:
         contexts = self.contexts(pca_components)
@@ -75,9 +96,10 @@ def load_cache(path: str | Path) -> RoutingCache:
         ]
         with np.load(io.BytesIO(archive.read("arrays.npz")), allow_pickle=False) as loaded:
             arrays = {name: loaded[name].copy() for name in loaded.files}
-    if manifest.get("schema_version") != CACHE_SCHEMA_VERSION:
+    if manifest.get("schema_version") not in CACHE_SCHEMA_VERSIONS:
         raise ValueError(
-            f"Expected {CACHE_SCHEMA_VERSION}, got {manifest.get('schema_version')}"
+            "Expected one of "
+            f"{sorted(CACHE_SCHEMA_VERSIONS)}, got {manifest.get('schema_version')}"
         )
     count = int(manifest["examples"])
     if len(records) != count or any(len(value) != count for key, value in arrays.items() if key in {"hidden_states", "uncertainty_features", "option_probabilities", "option_log_likelihoods", "contexts", "outcomes", "eligible"}):

@@ -177,6 +177,43 @@ the real disagreement outcome.
 
 Artifact location: `holdout-residual-results/holdout-residual-results.zip`.
 
+### 2026-09-03 — Stronger synthetic-tree follow-up design
+
+Branch: `experiment/residual-diagnostics`
+
+Motivation: the first synthetic probability-binned plot had only 4/32
+unadjusted 95% intervals excluding zero. Its generating-tree leaf residuals
+were large, but the probability bins mixed positive- and negative-residual
+leaves and therefore obscured part of the known misspecification.
+
+Revised design:
+
+- use a stratified 50/50 train-validation split, yielding 2,569 rows in each
+  split for the current 5,138 eligible examples;
+- retain the depth-two gated tree and training-median splits on prompt
+  components 1--3;
+- strengthen the alternating leaf probabilities to
+  `[0.02, 0.98, 0.98, 0.02]`;
+- continue sampling fake labels with seed 10000 and without real outcomes;
+- use `round(sqrt(2569)) = 51` probability bins, approximately 50 observations
+  per bin;
+- add 95% intervals and a dedicated plot for residual means within the four
+  known generating-tree leaves.
+
+Planned command:
+
+```powershell
+analyze-holdout-residuals `
+  --cache llm-routing-cache-full.zip `
+  --output-dir holdout-residual-results-strong `
+  --validation-fraction 0.5 `
+  --seed 0
+```
+
+The earlier 80/20 result remains part of the experiment history and should not
+be overwritten. No revised numerical conclusion is recorded until this command
+is run.
+
 ## Template for future entries
 
 ```text
