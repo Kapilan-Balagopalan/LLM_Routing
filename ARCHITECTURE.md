@@ -100,18 +100,25 @@ The `analyze-holdout-residuals` entry point reads schema-v2 manifest block
 boundaries and uses one stratified 50/50 split across all eligible rows. It
 compares validation-set binned logistic residuals for the combined uncertainty
 and hidden-state blocks, the prompt-only block, and fake labels produced by a
-balanced probabilistic depth-four decision-tree teacher. Fifteen training-set
-quantile splits of prompt PC1 create 16 similarly supported leaves. Locally
-alternating probabilities over an increasing global trend create a nonlinear
-step function intended to remain visible after binning by the fitted logistic
-probability. Bernoulli labels are generated without real outcomes or validation
-information. No ARC gold answers are used.
+50-tree, depth-four random-forest teacher using up to 12 prompt components. The
+forest learns an outcome-free deterministic target containing pairwise
+interactions and oscillating terms from training prompt features only.
+Bernoulli labels are generated without real outcomes or validation information.
+No ARC gold answers are used.
 
 The diagnostic uses approximately equal-size bins ordered by validation
 predicted probability, with `round(sqrt(n_validation))` bins. It saves
-pointwise raw, Pearson, and deviance residuals, bin means and intervals, tree
-leaf summaries with intervals, separate probability-bin and tree-leaf plots,
-metadata, and a ZIP bundle.
+pointwise raw, Pearson, and deviance residuals plus bin means and intervals.
+
+A second, common visual diagnostic is computed for all three scenarios. Within
+the training split, five-fold out-of-fold logistic predictions create residual
+targets. Extra Trees learns a nonlinear residual correction and Ridge provides
+a linear comparator. Neither learner sees validation outcomes. Validation rows
+are sorted by the signed Extra Trees correction into 10 equal-size bins, then
+the observed logistic residual mean and its 95% interval are plotted against
+the predicted correction with zero and `y=x` reference lines. The corresponding
+point rows, bin rows, model-comparison metrics, plot, metadata, and ZIP bundle
+are saved.
 
 ## Branch-specific additions
 
@@ -121,8 +128,9 @@ metadata, and a ZIP bundle.
 - `experiment/residual-diagnostics` adds out-of-fold raw, Pearson, and deviance
   residual tables plus binned residual plots for logistic, selected HGB, and
   selected MLP models. It also contains the separate schema-v2 1:1 holdout
-  comparison across uncertainty+hidden, prompt-only, and tree-generated-label
-  settings.
+  comparison across uncertainty+hidden, prompt-only, and synthetic-label
+  settings. The current active generator is the multifeature forest design
+  recorded in `EXPERIMENTS.md`.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather
 than inferring research intent from implementation details alone.

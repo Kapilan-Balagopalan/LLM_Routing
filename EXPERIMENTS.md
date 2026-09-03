@@ -288,6 +288,54 @@ feature used by the teacher, rather than by fitted probability.
 Artifact location:
 `holdout-residual-depth4-results/holdout-residual-results.zip`.
 
+### 2026-09-03 — Multifeature forest residual-predictability design
+
+Branch: `experiment/residual-diagnostics`
+
+Motivation: fitted-probability bins can mix positive and negative conditional
+residuals. The same diagnostic is also needed for the two real-label contexts,
+where synthetic tree leaves do not exist. Replace the active one-feature
+synthetic generator and add a common held-out residual-predictability visual.
+
+Design:
+
+- preserve the stratified 50/50 train-validation split and manifest-discovered
+  context blocks;
+- generate the synthetic scenario with a 50-tree, depth-four random-forest
+  teacher using up to prompt PCs 1--12;
+- fit that teacher only on training prompt features against a deterministic,
+  outcome-free target containing alternating pairwise interactions and sine
+  terms, then sample train and validation labels from its probabilities with
+  seed 10000;
+- for each of uncertainty+hidden real labels, prompt-only real labels, and
+  synthetic forest labels, create logistic residual targets using five-fold
+  cross-fitted logistic predictions entirely inside the training half;
+- fit an Extra Trees residual regressor and a standardized linear Ridge
+  comparator to those training residual targets;
+- use validation outcomes only for final evaluation;
+- order validation rows by the signed Extra Trees residual prediction and use
+  10 equal-size bins, so predicted negative and positive corrections are not
+  deliberately mixed;
+- plot mean observed logistic residual against mean predicted residual with
+  pointwise 95% intervals, a zero line, and an ideal `y=x` line;
+- report residual MSE for zero, linear, and forest corrections. A positive
+  forest MSE improvement over both zero and linear provides held-out evidence
+  of nonlinear residual structure.
+
+Planned command:
+
+```powershell
+analyze-holdout-residuals `
+  --cache llm-routing-cache-full.zip `
+  --output-dir holdout-residual-forest-results `
+  --validation-fraction 0.5 `
+  --residual-bin-count 10 `
+  --seed 0
+```
+
+No numerical conclusion is recorded until the user runs this command and
+returns the result bundle.
+
 ## Template for future entries
 
 ```text
