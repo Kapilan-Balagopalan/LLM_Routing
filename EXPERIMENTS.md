@@ -125,6 +125,19 @@ residual MSE improvement is positive and the permutation evidence is credible.
 Whether nonlinear models gain more must be judged from their out-of-fold change
 relative to logistic across the same context and folds.
 
+Initial 16-component result:
+
+- prompt PCA retained 37.05% of raw embedding variance;
+- prompt-only RBF SVM AUC was 0.6021 versus prompt logistic 0.5857;
+- best compact-30D AUC was 0.6584 versus best current-78D AUC 0.6673;
+- incremental prompt residual MSE change was -0.36%, so the usefulness rule
+  failed even though the shuffled-learner tail p-value was 0.0396.
+
+Post-result sensitivity decision: increase prompt PCA to 32 components while
+retaining only the 14 uncertainty features in the hybrid. The resulting compact
+context is 46D, not a full 110D concatenation. This is an explicitly exploratory
+sensitivity analysis, not the preregistered 16-component primary analysis.
+
 ## Template for future entries
 
 ```text

@@ -191,7 +191,7 @@ def run_prompt_embedding_experiment(
     cache_path: str | Path,
     prompt_embedding_path: str | Path,
     output_dir: str | Path,
-    prompt_components: int = 16,
+    prompt_components: int = 32,
     requested_folds: int = 5,
     residual_permutations: int = 100,
     seed: int = 0,
@@ -318,7 +318,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir", type=Path, default=Path("prompt-embedding-results")
     )
-    parser.add_argument("--prompt-components", type=int, default=16)
+    parser.add_argument("--prompt-components", type=int, default=32)
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--residual-permutations", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)

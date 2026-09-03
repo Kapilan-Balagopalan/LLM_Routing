@@ -99,13 +99,13 @@ def test_prompt_pca_is_fixed_size_and_outcome_free():
     assert summary["scope"] == "fixed transductive, outcome-free, selected eligible prompts"
 
 
-def test_compact_context_is_14_uncertainty_plus_16_prompt_dimensions():
+def test_compact_context_is_14_uncertainty_plus_32_prompt_dimensions():
     current = np.zeros((20, 78), dtype=np.float64)
-    prompt = np.ones((20, 16), dtype=np.float64)
+    prompt = np.ones((20, 32), dtype=np.float64)
     matrices = build_context_matrices(current, prompt, uncertainty_dimension=14)
     assert matrices["Current 78D"].shape == (20, 78)
-    assert matrices["Prompt PCA"].shape == (20, 16)
-    assert matrices["Uncertainty + prompt PCA"].shape == (20, 30)
+    assert matrices["Prompt PCA"].shape == (20, 32)
+    assert matrices["Uncertainty + prompt PCA"].shape == (20, 46)
 
 
 def test_incremental_residual_test_accepts_separate_prompt_context():
@@ -126,3 +126,8 @@ def test_incremental_residual_test_accepts_separate_prompt_context():
     assert summary["residual_context_dimension"] == 4
     assert summary["base_context"] == "current"
     assert summary["residual_context"] == "prompt"
+    assert summary["incrementally_useful_at_0.05"] == (
+        summary["mse_improvement"] > 0.0
+        and summary["permutation_p_value_one_sided"] is not None
+        and summary["permutation_p_value_one_sided"] <= 0.05
+    )

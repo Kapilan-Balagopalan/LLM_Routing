@@ -1031,13 +1031,24 @@ def cross_fitted_residual_predictability(
         "permutation_repeats": int(permutation_repeats),
         "permutation_p_value_one_sided": permutation_p_value,
         "null_mse_improvement_95_percentile": null_95_percentile,
-        "significant_at_0.05": bool(
+        "positive_mse_improvement": bool(observed_improvement > 0.0),
+        "permutation_tail_significant_at_0.05": bool(
             permutation_p_value is not None and permutation_p_value <= 0.05
+        ),
+        "incrementally_useful_at_0.05": bool(
+            observed_improvement > 0.0
+            and permutation_p_value is not None
+            and permutation_p_value <= 0.05
+        ),
+        "significant_at_0.05": bool(
+            observed_improvement > 0.0
+            and permutation_p_value is not None
+            and permutation_p_value <= 0.05
         ),
         "configuration": RESIDUAL_LEARNER_CONFIGURATION,
         "interpretation": (
-            "Positive relative improvement with a small permutation p-value "
-            "indicates predictable structure left in the logistic residuals."
+            "Incremental usefulness requires both positive held-out MSE "
+            "improvement and a one-sided permutation p-value at or below 0.05."
         ),
     }
     return point_rows, bin_rows, permutation_rows, summary
@@ -1107,7 +1118,9 @@ def plot_residual_predictability(
             label="Observed learner",
         )
         axes[1].set_title(
-            f"Permutation reference (p={summary['permutation_p_value_one_sided']:.3g})"
+            "Permutation reference "
+            f"(MSE change={observed:+.3g}, "
+            f"p={summary['permutation_p_value_one_sided']:.3g})"
         )
     else:
         axes[1].axvline(

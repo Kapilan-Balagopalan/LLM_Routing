@@ -133,19 +133,20 @@ Run the controlled CPU comparison:
 simulate-prompt-embedding-context `
   --cache llm-routing-cache.zip `
   --prompt-embeddings prompt-embeddings.zip `
-  --prompt-components 16 `
+  --prompt-components 32 `
   --residual-permutations 100
 ```
 
 It uses identical folds to compare the current 78-dimensional context, the
-16-dimensional prompt PCA context, and a compact 30-dimensional context made
-from 14 uncertainty features plus the 16 prompt features. The 64-dimensional
+32-dimensional prompt PCA context, and a compact 46-dimensional context made
+from 14 uncertainty features plus the 32 prompt features. The 64-dimensional
 weak-model hidden-state PCA is deliberately excluded from the compact hybrid.
 It also directly tests whether prompt features predict held-out residuals from
 the current logistic model. Prompt PCA is fixed, transductive, and outcome-free.
 Results are written to `prompt-embedding-results/` and bundled as
-`prompt-embedding-results.zip`. The prompt-component count remains configurable,
-but 16 is the preregistered primary setting for this experiment.
+`prompt-embedding-results.zip`. The prompt-component count remains configurable.
+The initial primary run used 16 components; 32 is a documented sensitivity run
+motivated by the initial PCA retaining only 37.05% of embedding variance.
 
 ## Where to edit
 
