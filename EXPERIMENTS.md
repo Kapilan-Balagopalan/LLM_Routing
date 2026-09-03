@@ -138,6 +138,41 @@ retaining only the 14 uncertainty features in the hybrid. The resulting compact
 context is 46D, not a full 110D concatenation. This is an explicitly exploratory
 sensitivity analysis, not the preregistered 16-component primary analysis.
 
+### 2026-09-02 — 32-component prompt sensitivity result
+
+Branch: `experiment/prompt-embedding`
+
+Configuration: 2,351 eligible examples, seed 0, five nested folds, and 100
+residual permutations. The 32 prompt components retained 52.14% of the raw
+384D MiniLM embedding variance.
+
+| Context/model comparison | ROC AUC | Log loss | Brier | Accuracy at 50% traffic |
+|---|---:|---:|---:|---:|
+| Current 78D, best AUC (XGBoost) | 0.6673 | 0.6347 | 0.2224 | 0.8550 |
+| Current 78D, best log loss (elastic logistic) | 0.6664 | 0.6339 | 0.2223 | 0.8473 |
+| Prompt 32D, RBF SVM | 0.6046 | 0.6601 | 0.2337 | 0.8316 |
+| Prompt 32D, logistic | 0.5861 | 0.6678 | 0.2376 | 0.8231 |
+| Compact 46D, elastic logistic | 0.6611 | 0.6375 | 0.2239 | 0.8520 |
+
+Prompt-only RBF SVM exceeded prompt-only logistic by 0.0185 AUC, supporting a
+nonlinear geometric relationship within the semantic embedding. The compact
+46D context improved over the compact 30D sensitivity but remained below the
+best current-78D model on overall AUC and probability quality.
+
+Incremental nested residual test (current-78D logistic base, prompt-32D HGB
+residual learner): zero-residual MSE 0.222771, corrected MSE 0.222180, absolute
+improvement 0.000592, relative improvement 0.266%, residual correlation 0.0696,
+and one-sided permutation p = 1/101 = 0.0099. No shuffled-residual fit matched
+the observed improvement. This passes the specified positive-improvement plus
+permutation-evidence rule, but the effect is small and the 32D analysis was
+selected after observing the 16D result.
+
+Decision: treat prompt semantics as modest incremental signal, not yet as a
+replacement online context. Next evaluate the cross-fitted two-stage predictor
+`current logistic probability + prompt residual correction` directly on AUC,
+log loss, Brier score, and routing skyline, then repeat across multiple split
+seeds before changing an online player.
+
 ## Template for future entries
 
 ```text
