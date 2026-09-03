@@ -20,14 +20,6 @@ from llm_routing_simulation.algorithm import (
 )
 from llm_routing_simulation.cache import RoutingCache, load_cache
 from llm_routing_simulation.environment import LLMCascadeEnvironment
-from llm_routing_simulation.prompt_embeddings import (
-    load_prompt_embedding_cache,
-    validate_prompt_embedding_source,
-)
-from llm_routing_simulation.prompt_experiment import (
-    align_prompt_embeddings,
-    prompt_pca_context,
-)
 from llm_routing_simulation.skyline import (
     binary_residual_diagnostics,
     cross_fitted_residual_predictability,
@@ -38,18 +30,19 @@ from llm_routing_simulation.skyline import (
 )
 
 
+SKYLINE_PLOT_MODELS = (
+    "Logistic (out-of-fold)",
+    "RBF SVM (out-of-fold)",
+    "Random routing (expected)",
+)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Replay online routing algorithms and supervised skylines offline."
     )
     parser.add_argument("--cache", required=True, type=Path)
-    parser.add_argument(
-        "--prompt-embeddings",
-        type=Path,
-        default=Path("prompt-embeddings.zip"),
-        help="Outcome-free prompt embedding sidecar aligned with the routing cache",
-    )
-    parser.add_argument("--prompt-components", type=int, default=32)
+    parser.add_argument("--prompt-components", type=int, default=64)
     parser.add_argument(
         "--experiment", choices=("all", "online", "skyline"), default="all"
     )
@@ -102,18 +95,15 @@ def _jsonable(value: Any) -> Any:
 
 def _prompt_context_rounds(
     cache: RoutingCache,
-    prompt_embedding_path: str | Path,
     prompt_components: int,
     limit: int | None,
 ):
-    """Attach one fixed outcome-free prompt-PCA context to every round."""
+    """Attach the manifest-defined prompt-PCA block to every eligible round."""
     rounds = cache.eligible_rounds()
-    embedding_cache = load_prompt_embedding_cache(prompt_embedding_path)
-    validate_prompt_embedding_source(embedding_cache, cache)
-    raw_embeddings = align_prompt_embeddings(rounds, embedding_cache)
-    contexts, pca_summary = prompt_pca_context(
-        raw_embeddings, prompt_components
+    all_contexts, block = cache.context_block(
+        "prompt_embedding_pca", components=prompt_components
     )
+    contexts = all_contexts[cache.eligible_indices]
     if limit is not None:
         if limit < 1:
             raise ValueError("--limit must be positive")
@@ -126,12 +116,11 @@ def _prompt_context_rounds(
         for index, item in enumerate(rounds)
     ]
     return prompt_rounds, {
-        "source": "question and labeled choices only",
-        "embedding_model": embedding_cache.manifest["embedding_model"],
-        "embedding_cache": str(Path(prompt_embedding_path).resolve()),
-        "pca": pca_summary,
+        "source": cache.manifest.get("prompt_embedding_definition"),
+        "context_block": block,
         "context_dimension": int(contexts.shape[1]),
-        "fit_scope": "all eligible prompts before optional experiment limit",
+        "pca_scope": cache.manifest.get("pca_scope"),
+        "fit_scope": "precomputed across all collected prompts",
         "outcome_or_answer_features_used": False,
     }
 
@@ -400,7 +389,8 @@ def _plot(output: Path, online_rows: list[dict], skyline_rows: list[dict]) -> No
         axes[0].text(0.5, 0.5, "Online experiment not requested", ha="center")
 
     if skyline_rows:
-        models = list(dict.fromkeys(row["model"] for row in skyline_rows))
+        present = {row["model"] for row in skyline_rows}
+        models = [name for name in SKYLINE_PLOT_MODELS if name in present]
         for model in models:
             selected = [row for row in skyline_rows if row["model"] == model]
             selected.sort(key=lambda row: row["routing_rate"])
@@ -410,7 +400,7 @@ def _plot(output: Path, online_rows: list[dict], skyline_rows: list[dict]) -> No
                 linewidth=2.5 if any(row.get("selected") for row in selected) else 1.2,
                 label=model,
             )
-        axes[1].set_title("Out-of-fold supervised skylines")
+        axes[1].set_title("Prompt context: linear vs nonlinear skyline")
         axes[1].legend(fontsize=7)
     else:
         axes[1].text(0.5, 0.5, "Skyline experiment not requested", ha="center")
@@ -460,7 +450,6 @@ def main(argv: Iterable[str] | None = None) -> int:
     cache = load_cache(args.cache)
     rounds, context_summary = _prompt_context_rounds(
         cache,
-        args.prompt_embeddings,
         args.prompt_components,
         args.limit,
     )

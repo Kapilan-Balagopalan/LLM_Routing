@@ -105,7 +105,7 @@ def test_prompt_pca_is_fixed_size_and_outcome_free():
     assert summary["scope"] == "fixed transductive, outcome-free, selected eligible prompts"
 
 
-def test_prompt_context_rounds_replace_saved_llm_context_before_limit(tmp_path):
+def test_prompt_context_rounds_use_manifest_block_before_limit():
     records = [
         {
             "id": f"arc-{index}",
@@ -119,38 +119,44 @@ def test_prompt_context_rounds_replace_saved_llm_context_before_limit(tmp_path):
     ]
     cache = RoutingCache(
         manifest={
-            "schema_version": "llm-routing-cache-v1",
+            "schema_version": "llm-routing-cache-v2",
             "pca_components": 64,
+            "prompt_embedding_definition": "fixture prompt representation",
+            "pca_scope": "fixed transductive, outcome-free",
+            "context_blocks": [
+                {"name": "uncertainty", "start": 0, "stop": 2},
+                {"name": "hidden_state_pca", "start": 2, "stop": 4},
+                {"name": "prompt_embedding_pca", "start": 4, "stop": 8},
+            ],
         },
         records=records,
         arrays={
             "eligible": np.ones(6, dtype=bool),
-            "contexts": np.full((6, 78), 99.0, dtype=np.float64),
+            "contexts": np.column_stack(
+                (
+                    np.full((6, 4), 99.0),
+                    np.arange(24, dtype=np.float64).reshape(6, 4),
+                )
+            ),
         },
-    )
-    embeddings = np.random.default_rng(12).normal(size=(6, 4))
-    sidecar = tmp_path / "prompt-embeddings.zip"
-    save_prompt_embedding_cache(
-        sidecar,
-        source_cache=cache,
-        embedding_model="fixture-encoder",
-        texts=[build_semantic_prompt(record) for record in records],
-        embeddings=embeddings,
-        normalized=False,
     )
 
     rounds, summary = _prompt_context_rounds(
         cache,
-        sidecar,
-        prompt_components=2,
+        prompt_components=4,
         limit=3,
     )
     assert len(rounds) == 3
-    assert all(round_.context.shape == (2,) for round_ in rounds)
-    assert all(np.all(np.isfinite(round_.context)) for round_ in rounds)
-    assert summary["context_dimension"] == 2
+    assert all(round_.context.shape == (4,) for round_ in rounds)
+    assert np.array_equal(
+        np.stack([round_.context for round_ in rounds]),
+        cache.arrays["contexts"][:3, 4:8],
+    )
+    assert summary["context_dimension"] == 4
+    assert summary["context_block"]["start"] == 4
+    assert summary["context_block"]["stop"] == 8
     assert summary["outcome_or_answer_features_used"] is False
-    assert summary["fit_scope"] == "all eligible prompts before optional experiment limit"
+    assert summary["fit_scope"] == "precomputed across all collected prompts"
 
 
 def test_compact_context_is_14_uncertainty_plus_32_prompt_dimensions():

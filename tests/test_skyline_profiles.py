@@ -16,7 +16,7 @@ from llm_routing_simulation.skyline import (
     plot_binary_residuals,
     plot_residual_predictability,
 )
-from llm_routing_simulation.run import _parser
+from llm_routing_simulation.run import SKYLINE_PLOT_MODELS, _parser
 
 
 def test_skyline_stops_at_hgb_350():
@@ -24,6 +24,14 @@ def test_skyline_stops_at_hgb_350():
     assert profiles["HGB-350"]["max_iter"] == 50
     assert profiles["HGB-350"]["max_leaf_nodes"] == 7
     assert len(profiles) == 5
+
+
+def test_main_skyline_plot_is_limited_to_research_comparison():
+    assert SKYLINE_PLOT_MODELS == (
+        "Logistic (out-of-fold)",
+        "RBF SVM (out-of-fold)",
+        "Random routing (expected)",
+    )
 
 
 def test_online_etc_and_igw_use_rbf_svm_configuration():
@@ -63,8 +71,7 @@ def test_cbpside_class_bootstrap_until_balanced_or_capped():
 
 def test_online_exploration_defaults():
     args = _parser().parse_args(["--cache", "fixture.zip"])
-    assert args.prompt_embeddings.name == "prompt-embeddings.zip"
-    assert args.prompt_components == 32
+    assert args.prompt_components == 64
     assert args.etc_tastes == 300
     assert args.cbpside_tastes == 0
     assert args.cbpside_bootstrap_per_class == 0

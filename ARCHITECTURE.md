@@ -12,10 +12,9 @@ weak- or strong-model generation is repeated.
 ## Data flow
 
 ```text
-llm-routing-cache.zip
+llm-routing-cache-full.zip
     -> cache.py validates records and arrays
-prompt-embeddings.zip
-    -> run.py validates alignment and fits one outcome-free 32D prompt PCA
+    -> run.py finds prompt_embedding_pca from manifest context_blocks
     -> environment.py emits the current context and weak answer
     -> player.py defines the act-then-update protocol
     -> algorithm.py chooses action 0 or 1 from revealed history
@@ -33,28 +32,28 @@ context, and feedback that the environment actually revealed.
 
 ## Cache and context
 
-The current cache manifest records the original weak-model features:
+The v2 cache manifest records:
 
-- schema: `llm-routing-cache-v1`;
-- dataset: `allenai/ai2_arc`, `ARC-Easy`, test split;
-- 2,365 collected rows and 2,351 eligible rows;
+- schema: `llm-routing-cache-v2`;
+- dataset: `allenai/ai2_arc`, `ARC-Easy`, train, validation, and test splits;
+- 5,173 collected rows and 5,138 eligible rows;
 - weak model: `Qwen/Qwen2.5-0.5B-Instruct`;
 - strong model: `meta-llama/Llama-2-13b-chat-hf`;
 - outcome: `1` exactly when extracted weak and strong answers differ;
 - raw concatenated hidden dimension: 4,480;
 - fixed, transductive, outcome-free PCA: 64 components;
-- final context: 14 uncertainty features plus 64 whitened PCA features,
-  featurewise standardized to 78 dimensions.
+- full saved context: 14 uncertainty features, 64 hidden-state PCA features,
+  and 64 prompt-embedding PCA features, standardized to 142 dimensions.
 
 The 14 uncertainty features contain choice entropy, normalized choice entropy,
 top probability, top-two margin, one-minus-top probability, next-token
 vocabulary entropy, four option probabilities, and four option log likelihoods.
 
-On `experiment/prompt-routing`, those saved 78 features are not exposed to the
-players. `run.py` aligns the outcome-free semantic sidecar by example ID, fits a
-single fixed transductive PCA across all eligible prompts, and replaces every
-round's context with the resulting 32D prompt vector. An optional experiment
-limit is applied only after this fixed projection is constructed.
+On `experiment/prompt-routing`, `run.py` obtains the block boundaries by finding
+`prompt_embedding_pca` in `manifest.context_blocks`. It exposes all 64 prompt
+components to the players and excludes the uncertainty and hidden-state blocks.
+The PCA was constructed during collection across all prompts without outcomes.
+An optional experiment limit is applied only after block selection.
 
 ## Core modules
 
@@ -134,7 +133,7 @@ or environment interfaces.
 - `experiment/prompt-embedding` adds a frozen semantic sidecar, a three-context
   supervised comparison, an incremental prompt-residual test, and a two-stage
   corrected-probability skyline with split-seed stability results.
-- `experiment/prompt-routing` uses the fixed prompt-only 32D context for both
+- `experiment/prompt-routing` uses the fixed prompt-only 64D context for both
   supervised skylines and the online routing players.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather

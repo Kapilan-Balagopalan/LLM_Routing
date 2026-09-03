@@ -18,13 +18,13 @@ python -m venv .venv
 python -m pip install -e ".[test]"
 ```
 
-Copy both `llm-routing-cache.zip` and its aligned `prompt-embeddings.zip`
-sidecar into this folder. Run every current experiment with:
+Copy `llm-routing-cache-full.zip` into this folder. It already contains the
+64-dimensional prompt-PCA block, so no separate embedding sidecar is needed for
+the routing experiment. Run every current experiment with:
 
 ```powershell
 simulate-llm-routing `
-  --cache llm-routing-cache.zip `
-  --prompt-embeddings prompt-embeddings.zip `
+  --cache llm-routing-cache-full.zip `
   --experiment all
 ```
 
@@ -32,8 +32,7 @@ For a quick check, use a prefix:
 
 ```powershell
 simulate-llm-routing `
-  --cache llm-routing-cache.zip `
-  --prompt-embeddings prompt-embeddings.zip `
+  --cache llm-routing-cache-full.zip `
   --experiment skyline `
   --limit 100
 ```
@@ -54,6 +53,11 @@ trajectory, `routing_comparison.png`, and a portable `simulation-results.zip`.
 Each execution refits all estimators from the cached samples; no LLM generation
 is repeated. You can run new seeds, loss values, thresholds and algorithms many
 times against the same cache.
+
+For readability, `routing_comparison.png` plots only logistic, RBF SVM, and the
+expected random reference in its supervised skyline panel. Metrics and skyline
+points for every fitted diagnostic model remain available in
+`supervised_model_comparison.csv` and `supervised_skyline.csv`.
 
 Skyline runs also create `supervised_residual_plots.png`. Its three panels use
 strictly out-of-fold predictions from linear logistic, the HGB capacity selected
@@ -76,8 +80,9 @@ or another nonnegative count to control its precision and runtime.
 
 ## Current defaults
 
-- Context: a fixed 32-dimensional PCA projection of the question-and-choices
-  prompt embedding. Weak-model uncertainty and internal states are not used.
+- Context: the complete fixed 64-dimensional `prompt_embedding_pca` block from
+  the v2 cache manifest. Weak-model uncertainty and hidden-state PCA blocks are
+  not used.
 - Loss values: `l01 = 1.82, 2.22, 2.67, 3.33`, `l11 = 1`.
 - ETC: 300 initial tastes, then a frozen calibrated RBF-SVM estimator.
 - CBPSide: regularized linear logistic regression with no forced tastes and no
@@ -90,7 +95,7 @@ or another nonnegative count to control its precision and runtime.
 - Supervised model comparison reports ROC AUC, log loss, Brier score,
   ten-bin calibration error, and routing accuracy at 50% traffic. Install the
   optional tree libraries with `python -m pip install -e ".[benchmark,test]"`.
-- RBF SVM is connected to ETC and IGW after outperforming logistic on the 32D
+- RBF SVM is connected to ETC and IGW to test nonlinear prediction in the
   prompt-only context; CBPSide remains logistic. The other models remain
   supervised skyline diagnostics.
 
@@ -98,22 +103,22 @@ Pass alternatives on the command line, for example:
 
 ```powershell
 simulate-llm-routing `
-  --cache llm-routing-cache.zip `
-  --prompt-embeddings prompt-embeddings.zip `
+  --cache llm-routing-cache-full.zip `
   --l01-values 1 2 4 8 `
   --seed 7
 ```
 
-The prompt dimension defaults to 32 and can be changed explicitly with
-`--prompt-components`, but 32 is the planned configuration for this branch.
+The prompt dimension defaults to all 64 available components. The simulator
+locates `prompt_embedding_pca` through `manifest.json -> context_blocks`; it
+does not hardcode column numbers. `--prompt-components` can select a smaller
+prefix for a later ablation.
 
-## Prompt-embedding experiment
+## Earlier external prompt-embedding diagnostic
 
-This branch uses question semantics as the complete routing context. The cache
-already contains every ARC question and choice, so Qwen and Llama inference is
-not repeated. The fixed prompt PCA is fit once across all eligible prompts using
-no answers or disagreement outcomes, then the same 32 coordinates are supplied
-to skyline models and every online player.
+This earlier diagnostic uses a separate MiniLM sidecar to compare prompt
+features with the old weak-model context. It is retained for reproducibility;
+the current prompt-routing command instead reads the 64D prompt block already
+stored in the v2 full cache.
 
 Install the optional local encoder dependency:
 

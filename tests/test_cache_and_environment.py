@@ -8,7 +8,7 @@ from llm_routing_simulation.cache import load_cache
 from llm_routing_simulation.environment import LLMCascadeEnvironment
 
 
-def _fixture_cache(path):
+def _fixture_cache(path, schema_version="llm-routing-cache-v1"):
     records = [
         {
             "id": "0",
@@ -24,7 +24,7 @@ def _fixture_cache(path):
         },
     ]
     manifest = {
-        "schema_version": "llm-routing-cache-v1",
+        "schema_version": schema_version,
         "examples": 2,
         "pca_components": 2,
         "routing_reference": "strong_model_answer",
@@ -79,3 +79,32 @@ def test_smaller_fixed_pca_context(tmp_path):
     contexts = cache.contexts(pca_components=1)
     assert contexts.shape == (2, 15)
     assert np.all(np.isfinite(contexts))
+
+
+def test_v2_cache_schema_is_supported(tmp_path):
+    path = tmp_path / "cache-v2.zip"
+    _fixture_cache(path, schema_version="llm-routing-cache-v2")
+    cache = load_cache(path)
+    assert cache.manifest["schema_version"] == "llm-routing-cache-v2"
+
+
+def test_manifest_context_block_selection():
+    from llm_routing_simulation.cache import RoutingCache
+
+    contexts = np.arange(30, dtype=np.float64).reshape(5, 6)
+    cache = RoutingCache(
+        manifest={
+            "context_blocks": [
+                {"name": "first", "start": 0, "stop": 2},
+                {"name": "prompt_embedding_pca", "start": 2, "stop": 6},
+            ]
+        },
+        records=[],
+        arrays={"contexts": contexts},
+    )
+    selected, metadata = cache.context_block(
+        "prompt_embedding_pca", components=3
+    )
+    assert np.array_equal(selected, contexts[:, 2:5])
+    assert metadata["available_components"] == 4
+    assert metadata["selected_components"] == 3
