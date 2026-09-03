@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
-from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -32,7 +33,30 @@ LOGISTIC_CONFIGURATION = {
     "max_iter": 5000,
     "preprocessing": "training-split StandardScaler",
 }
-SYNTHETIC_TREE_LEAF_PROBABILITIES = (0.02, 0.98, 0.98, 0.02)
+RESIDUAL_INNER_FOLDS = 5
+RESIDUAL_FOREST_CONFIGURATION = {
+    "estimator": "ExtraTreesRegressor",
+    "n_estimators": 300,
+    "max_depth": None,
+    "min_samples_leaf": 20,
+    "max_features": 0.75,
+    "criterion": "squared_error",
+}
+LINEAR_RESIDUAL_CONFIGURATION = {
+    "estimator": "Ridge",
+    "alpha": 1.0,
+    "preprocessing": "training-split StandardScaler",
+}
+SYNTHETIC_FOREST_CONFIGURATION = {
+    "estimator": "RandomForestRegressor",
+    "n_estimators": 50,
+    "max_depth": 4,
+    "min_samples_leaf": 10,
+    "max_features": 0.75,
+    "prompt_feature_count": 12,
+    "probability_logit_scale": 2.5,
+    "probability_clip": [0.02, 0.98],
+}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -40,7 +64,7 @@ def _parser() -> argparse.ArgumentParser:
         description=(
             "Compare validation-set binned logistic residuals for the cached "
             "uncertainty+hidden context, prompt context, and synthetic "
-            "decision-tree labels."
+            "random-forest labels."
         )
     )
     parser.add_argument("--cache", required=True, type=Path)
@@ -49,6 +73,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--validation-fraction", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--residual-bin-count", type=int, default=10)
     return parser
 
 
@@ -97,9 +122,11 @@ def _diagnose_scenario(
     validation_positions: np.ndarray,
     example_ids: list[str],
     bin_count: int,
+    residual_bin_count: int,
     label_source: str,
-) -> tuple[list[dict], list[dict], dict, object]:
-    model, probabilities = _fit_logistic(
+    seed: int,
+) -> tuple[list[dict], list[dict], list[dict], list[dict], dict]:
+    _, probabilities = _fit_logistic(
         train_contexts,
         train_outcomes,
         validation_contexts,
@@ -118,6 +145,27 @@ def _diagnose_scenario(
         row["scenario"] = scenario
         row["label_source"] = label_source
     metrics = _model_metrics(validation_outcomes, probabilities)
+    residual_points, residual_bins, residual_summary = (
+        _heldout_residual_predictability(
+            train_contexts,
+            validation_contexts,
+            train_outcomes,
+            validation_outcomes,
+            probabilities,
+            bin_count=residual_bin_count,
+            seed=seed,
+        )
+    )
+    for row in residual_points:
+        local_index = int(row["example_index"])
+        eligible_position = int(validation_positions[local_index])
+        row["scenario"] = scenario
+        row["eligible_position"] = eligible_position
+        row["example_id"] = example_ids[eligible_position]
+        row["label_source"] = label_source
+    for row in residual_bins:
+        row["scenario"] = scenario
+        row["label_source"] = label_source
     metrics.update(
         {
             "scenario": scenario,
@@ -136,91 +184,292 @@ def _diagnose_scenario(
                 )
             ),
             "logistic_configuration": LOGISTIC_CONFIGURATION,
+            "residual_predictability": residual_summary,
         }
     )
-    return points, bins, metrics, model
+    return points, bins, residual_points, residual_bins, metrics
 
 
-def _synthetic_tree_outputs(
+def _training_oof_logistic_probabilities(
     contexts: np.ndarray,
-    thresholds: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return leaf IDs and probabilities from a fixed depth-two tree."""
-    root_right = contexts[:, 0] > thresholds[0]
-    left_right = contexts[:, 1] > thresholds[1]
-    right_right = contexts[:, 2] > thresholds[2]
-    leaf_ids = np.where(
-        root_right,
-        np.where(right_right, 3, 2),
-        np.where(left_right, 1, 0),
-    ).astype(np.int64)
-    probabilities = np.asarray(SYNTHETIC_TREE_LEAF_PROBABILITIES)[leaf_ids]
-    return leaf_ids, probabilities
-
-
-def _synthetic_tree_rules(thresholds: np.ndarray) -> str:
-    probabilities = SYNTHETIC_TREE_LEAF_PROBABILITIES
-    return "\n".join(
-        [
-            f"if prompt_pc_1 <= {thresholds[0]:.8g}:",
-            (
-                f"  if prompt_pc_2 <= {thresholds[1]:.8g}: "
-                f"P(fake_y=1) = {probabilities[0]:.2f}"
-            ),
-            f"  else: P(fake_y=1) = {probabilities[1]:.2f}",
-            "else:",
-            (
-                f"  if prompt_pc_3 <= {thresholds[2]:.8g}: "
-                f"P(fake_y=1) = {probabilities[2]:.2f}"
-            ),
-            f"  else: P(fake_y=1) = {probabilities[3]:.2f}",
-        ]
-    ) + "\n"
-
-
-def _tree_leaf_residuals(
-    validation_leaf_ids: np.ndarray,
-    validation_teacher_probabilities: np.ndarray,
-    point_rows: list[dict],
-) -> list[dict]:
-    rows = []
-    for leaf_id in sorted(np.unique(validation_leaf_ids)):
-        indices = np.flatnonzero(validation_leaf_ids == leaf_id)
-        selected = [point_rows[int(index)] for index in indices]
-        residuals = np.asarray(
-            [row["raw_residual"] for row in selected], dtype=np.float64
+    outcomes: np.ndarray,
+    *,
+    seed: int,
+) -> tuple[np.ndarray, int]:
+    """Build honest logistic residual targets inside the training split."""
+    class_counts = np.bincount(outcomes, minlength=2)
+    fold_count = min(RESIDUAL_INNER_FOLDS, int(np.min(class_counts)))
+    if fold_count < 2:
+        raise ValueError(
+            "Residual prediction requires two training examples per class"
         )
+    splitter = StratifiedKFold(
+        n_splits=fold_count,
+        shuffle=True,
+        random_state=seed,
+    )
+    probabilities = np.empty(outcomes.size, dtype=np.float64)
+    for train_indices, test_indices in splitter.split(contexts, outcomes):
+        _, probabilities[test_indices] = _fit_logistic(
+            contexts[train_indices],
+            outcomes[train_indices],
+            contexts[test_indices],
+        )
+    return probabilities, fold_count
+
+
+def _heldout_residual_predictability(
+    train_contexts: np.ndarray,
+    validation_contexts: np.ndarray,
+    train_outcomes: np.ndarray,
+    validation_outcomes: np.ndarray,
+    validation_logistic_probabilities: np.ndarray,
+    *,
+    bin_count: int,
+    seed: int,
+) -> tuple[list[dict], list[dict], dict]:
+    """Predict logistic residuals without training on validation outcomes."""
+    training_probabilities, fold_count = (
+        _training_oof_logistic_probabilities(
+            train_contexts,
+            train_outcomes,
+            seed=seed + 1_000,
+        )
+    )
+    training_residuals = train_outcomes.astype(np.float64) - training_probabilities
+    minimum_leaf = min(
+        RESIDUAL_FOREST_CONFIGURATION["min_samples_leaf"],
+        max(2, train_contexts.shape[0] // 10),
+    )
+    forest = ExtraTreesRegressor(
+        n_estimators=RESIDUAL_FOREST_CONFIGURATION["n_estimators"],
+        max_depth=RESIDUAL_FOREST_CONFIGURATION["max_depth"],
+        min_samples_leaf=minimum_leaf,
+        max_features=RESIDUAL_FOREST_CONFIGURATION["max_features"],
+        criterion=RESIDUAL_FOREST_CONFIGURATION["criterion"],
+        random_state=seed + 2_000,
+        n_jobs=1,
+    )
+    forest.fit(train_contexts, training_residuals)
+    predicted_residuals = forest.predict(validation_contexts)
+
+    linear = make_pipeline(
+        StandardScaler(),
+        Ridge(alpha=LINEAR_RESIDUAL_CONFIGURATION["alpha"]),
+    )
+    linear.fit(train_contexts, training_residuals)
+    linear_predicted_residuals = linear.predict(validation_contexts)
+
+    observed_residuals = (
+        validation_outcomes.astype(np.float64)
+        - validation_logistic_probabilities
+    )
+    zero_squared_errors = np.square(observed_residuals)
+    forest_squared_errors = np.square(observed_residuals - predicted_residuals)
+    linear_squared_errors = np.square(
+        observed_residuals - linear_predicted_residuals
+    )
+    assignments = np.empty(observed_residuals.size, dtype=np.int64)
+    ordered_indices = np.argsort(predicted_residuals, kind="stable")
+    chunks = np.array_split(
+        ordered_indices, min(bin_count, observed_residuals.size)
+    )
+    bin_rows = []
+    for bin_index, indices in enumerate(chunks, start=1):
+        assignments[indices] = bin_index
+        selected_residuals = observed_residuals[indices]
+        mean_observed = float(np.mean(selected_residuals))
         standard_error = (
-            float(np.std(residuals, ddof=1) / np.sqrt(residuals.size))
-            if residuals.size > 1
+            float(np.std(selected_residuals, ddof=1) / np.sqrt(indices.size))
+            if indices.size > 1
             else 0.0
         )
-        mean_residual = float(np.mean(residuals))
-        rows.append(
+        bin_rows.append(
             {
-                "tree_leaf_id": int(leaf_id),
+                "bin": bin_index,
                 "count": int(indices.size),
-                "teacher_positive_probability": float(
-                    np.mean(validation_teacher_probabilities[indices])
+                "mean_predicted_residual": float(
+                    np.mean(predicted_residuals[indices])
                 ),
-                "fake_positive_rate": float(
-                    np.mean([row["observed_disagreement"] for row in selected])
+                "mean_linear_predicted_residual": float(
+                    np.mean(linear_predicted_residuals[indices])
                 ),
-                "mean_logistic_probability": float(
-                    np.mean(
-                        [
-                            row["predicted_disagreement_probability"]
-                            for row in selected
-                        ]
-                    )
-                ),
-                "mean_raw_residual": mean_residual,
+                "mean_observed_residual": mean_observed,
                 "standard_error": standard_error,
-                "ci95_lower": mean_residual - 1.96 * standard_error,
-                "ci95_upper": mean_residual + 1.96 * standard_error,
+                "ci95_lower": mean_observed - 1.96 * standard_error,
+                "ci95_upper": mean_observed + 1.96 * standard_error,
             }
         )
-    return rows
+
+    point_rows = [
+        {
+            "example_index": index,
+            "observed_disagreement": int(validation_outcomes[index]),
+            "logistic_probability": float(
+                validation_logistic_probabilities[index]
+            ),
+            "observed_logistic_residual": float(observed_residuals[index]),
+            "forest_predicted_residual": float(predicted_residuals[index]),
+            "linear_predicted_residual": float(
+                linear_predicted_residuals[index]
+            ),
+            "residual_prediction_bin": int(assignments[index]),
+            "zero_baseline_squared_error": float(zero_squared_errors[index]),
+            "forest_squared_error": float(forest_squared_errors[index]),
+            "linear_squared_error": float(linear_squared_errors[index]),
+        }
+        for index in range(observed_residuals.size)
+    ]
+    zero_mse = float(np.mean(zero_squared_errors))
+    forest_mse = float(np.mean(forest_squared_errors))
+    linear_mse = float(np.mean(linear_squared_errors))
+    correlation = (
+        float(np.corrcoef(observed_residuals, predicted_residuals)[0, 1])
+        if np.std(observed_residuals) > 0.0
+        and np.std(predicted_residuals) > 0.0
+        else 0.0
+    )
+    summary = {
+        "method": (
+            "training-only cross-fitted logistic residual targets; Extra Trees "
+            "and linear Ridge residual learners; untouched holdout evaluation"
+        ),
+        "training_residual_inner_folds": fold_count,
+        "binning": (
+            "equal-size validation bins ordered by signed forest-predicted "
+            "logistic residual"
+        ),
+        "bin_count": int(len(chunks)),
+        "zero_baseline_mse": zero_mse,
+        "forest_residual_mse": forest_mse,
+        "linear_residual_mse": linear_mse,
+        "forest_mse_improvement_vs_zero": zero_mse - forest_mse,
+        "forest_relative_mse_improvement_vs_zero": (
+            (zero_mse - forest_mse) / zero_mse if zero_mse > 0.0 else 0.0
+        ),
+        "forest_mse_improvement_vs_linear": linear_mse - forest_mse,
+        "forest_observed_residual_correlation": correlation,
+        "forest_predicted_residual_standard_deviation": float(
+            np.std(predicted_residuals)
+        ),
+        "bins_with_95_percent_interval_excluding_zero": int(
+            sum(
+                row["ci95_lower"] > 0.0 or row["ci95_upper"] < 0.0
+                for row in bin_rows
+            )
+        ),
+        "forest_configuration": {
+            **RESIDUAL_FOREST_CONFIGURATION,
+            "effective_min_samples_leaf": minimum_leaf,
+        },
+        "linear_configuration": LINEAR_RESIDUAL_CONFIGURATION,
+    }
+    return point_rows, bin_rows, summary
+
+
+def _nonlinear_teacher_target(standardized_contexts: np.ndarray) -> np.ndarray:
+    """Construct an outcome-free multifeature target for the forest teacher."""
+    feature_count = standardized_contexts.shape[1]
+    signal = np.zeros(standardized_contexts.shape[0], dtype=np.float64)
+    for index in range(feature_count):
+        partner = (index + 1) % feature_count
+        sign = 1.0 if index % 2 == 0 else -1.0
+        signal += sign * np.tanh(
+            standardized_contexts[:, index]
+            * standardized_contexts[:, partner]
+        )
+        signal += 0.25 * np.sin(
+            (index + 1) * standardized_contexts[:, index]
+        )
+    scale = max(float(np.std(signal)), 1e-8)
+    return 1.0 / (1.0 + np.exp(-signal / scale))
+
+
+def _fit_synthetic_forest_teacher(
+    train_contexts: np.ndarray,
+    validation_contexts: np.ndarray,
+    *,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Fit a multifeature forest teacher without using real outcomes."""
+    feature_count = min(
+        SYNTHETIC_FOREST_CONFIGURATION["prompt_feature_count"],
+        train_contexts.shape[1],
+    )
+    train_features = np.asarray(
+        train_contexts[:, :feature_count], dtype=np.float64
+    )
+    validation_features = np.asarray(
+        validation_contexts[:, :feature_count], dtype=np.float64
+    )
+    means = np.mean(train_features, axis=0)
+    scales = np.std(train_features, axis=0)
+    scales[scales == 0.0] = 1.0
+    standardized_train = (train_features - means) / scales
+    latent_target = _nonlinear_teacher_target(standardized_train)
+    minimum_leaf = min(
+        SYNTHETIC_FOREST_CONFIGURATION["min_samples_leaf"],
+        max(2, train_features.shape[0] // 10),
+    )
+    teacher = RandomForestRegressor(
+        n_estimators=SYNTHETIC_FOREST_CONFIGURATION["n_estimators"],
+        max_depth=SYNTHETIC_FOREST_CONFIGURATION["max_depth"],
+        min_samples_leaf=minimum_leaf,
+        max_features=SYNTHETIC_FOREST_CONFIGURATION["max_features"],
+        criterion="squared_error",
+        random_state=seed,
+        n_jobs=1,
+    )
+    teacher.fit(train_features, latent_target)
+    train_scores = teacher.predict(train_features)
+    validation_scores = teacher.predict(validation_features)
+    score_center = float(np.mean(train_scores))
+    score_scale = max(float(np.std(train_scores)), 1e-8)
+
+    def probabilities(scores: np.ndarray) -> np.ndarray:
+        logits = (
+            SYNTHETIC_FOREST_CONFIGURATION["probability_logit_scale"]
+            * (scores - score_center)
+            / score_scale
+        )
+        values = 1.0 / (1.0 + np.exp(-np.clip(logits, -30.0, 30.0)))
+        lower, upper = SYNTHETIC_FOREST_CONFIGURATION["probability_clip"]
+        return np.clip(values, lower, upper)
+
+    train_probabilities = probabilities(train_scores)
+    validation_probabilities = probabilities(validation_scores)
+    summary = {
+        "purpose": (
+            "Generate controlled multidimensional nonlinear fake labels from "
+            "a random-forest teacher, then fit a logistic student."
+        ),
+        "real_outcomes_used": False,
+        "fit_scope": "training prompt features only",
+        "input_features": [
+            f"prompt_pc_{index + 1}" for index in range(feature_count)
+        ],
+        "input_feature_count": feature_count,
+        "latent_target": (
+            "deterministic sum of alternating pairwise tanh interactions and "
+            "univariate sine terms over standardized prompt components"
+        ),
+        "configuration": {
+            **SYNTHETIC_FOREST_CONFIGURATION,
+            "effective_min_samples_leaf": minimum_leaf,
+        },
+        "feature_importances": teacher.feature_importances_.tolist(),
+        "training_score_center": score_center,
+        "training_score_scale": score_scale,
+        "train_probability_range": [
+            float(np.min(train_probabilities)),
+            float(np.max(train_probabilities)),
+        ],
+        "validation_probability_range": [
+            float(np.min(validation_probabilities)),
+            float(np.max(validation_probabilities)),
+        ],
+    }
+    return train_probabilities, validation_probabilities, summary
 
 
 def analyze_holdout_residuals(
@@ -228,10 +477,13 @@ def analyze_holdout_residuals(
     *,
     validation_fraction: float = 0.5,
     seed: int = 0,
+    residual_bin_count: int = 10,
 ) -> dict:
     """Run the three requested analyses without writing result files."""
     if not 0.0 < validation_fraction < 1.0:
         raise ValueError("validation_fraction must be strictly between 0 and 1")
+    if residual_bin_count < 2:
+        raise ValueError("residual_bin_count must be at least two")
     uncertainty, uncertainty_block = cache.context_block("uncertainty")
     hidden, hidden_block = cache.context_block("hidden_state_pca")
     prompt, prompt_block = cache.context_block("prompt_embedding_pca")
@@ -256,12 +508,16 @@ def analyze_holdout_residuals(
 
     all_points: list[dict] = []
     all_bins: list[dict] = []
+    all_residual_prediction_points: list[dict] = []
+    all_residual_prediction_bins: list[dict] = []
     scenarios: list[dict] = []
-    for name, contexts in (
-        ("uncertainty_hidden_logistic", uncertainty_hidden),
-        ("prompt_logistic", prompt),
+    for scenario_index, (name, contexts) in enumerate(
+        (
+            ("uncertainty_hidden_logistic", uncertainty_hidden),
+            ("prompt_logistic", prompt),
+        )
     ):
-        points, bins, metrics, _ = _diagnose_scenario(
+        points, bins, residual_points, residual_bins, metrics = _diagnose_scenario(
             name,
             contexts[train_positions],
             contexts[validation_positions],
@@ -270,20 +526,22 @@ def analyze_holdout_residuals(
             validation_positions,
             example_ids,
             bin_count,
+            residual_bin_count,
             "cached_weak_strong_disagreement",
+            seed + scenario_index * 100,
         )
         all_points.extend(points)
         all_bins.extend(bins)
+        all_residual_prediction_points.extend(residual_points)
+        all_residual_prediction_bins.extend(residual_bins)
         scenarios.append(metrics)
 
-    if prompt.shape[1] < 3:
-        raise ValueError("The synthetic tree requires at least three prompt features")
-    tree_thresholds = np.median(prompt[train_positions, :3], axis=0)
-    train_leaf_ids, train_teacher_probabilities = _synthetic_tree_outputs(
-        prompt[train_positions], tree_thresholds
-    )
-    validation_leaf_ids, validation_teacher_probabilities = (
-        _synthetic_tree_outputs(prompt[validation_positions], tree_thresholds)
+    train_teacher_probabilities, validation_teacher_probabilities, teacher_summary = (
+        _fit_synthetic_forest_teacher(
+            prompt[train_positions],
+            prompt[validation_positions],
+            seed=seed + 9_000,
+        )
     )
     synthetic_seed = seed + 10_000
     synthetic_rng = np.random.default_rng(synthetic_seed)
@@ -295,8 +553,14 @@ def analyze_holdout_residuals(
     ).astype(np.int64)
     if np.unique(fake_train_outcomes).size != 2:
         raise ValueError("The synthetic tree generated only one training class")
-    synthetic_points, synthetic_bins, synthetic_metrics, _ = _diagnose_scenario(
-        "synthetic_tree_labels_logistic",
+    (
+        synthetic_points,
+        synthetic_bins,
+        synthetic_residual_points,
+        synthetic_residual_bins,
+        synthetic_metrics,
+    ) = _diagnose_scenario(
+        "synthetic_forest_labels_logistic",
         prompt[train_positions],
         prompt[validation_positions],
         fake_train_outcomes,
@@ -304,40 +568,25 @@ def analyze_holdout_residuals(
         validation_positions,
         example_ids,
         bin_count,
-        "synthetic_probabilistic_tree",
+        residual_bin_count,
+        "synthetic_probabilistic_forest",
+        seed + 200,
     )
     all_points.extend(synthetic_points)
     all_bins.extend(synthetic_bins)
+    all_residual_prediction_points.extend(synthetic_residual_points)
+    all_residual_prediction_bins.extend(synthetic_residual_bins)
     scenarios.append(synthetic_metrics)
 
-    tree_leaf_rows = _tree_leaf_residuals(
-        validation_leaf_ids,
-        validation_teacher_probabilities,
-        synthetic_points,
+    teacher_summary.update(
+        {
+            "label_sampling_seed": synthetic_seed,
+            "train_fake_positive_rate": float(np.mean(fake_train_outcomes)),
+            "validation_fake_positive_rate": float(
+                np.mean(fake_validation_outcomes)
+            ),
+        }
     )
-    teacher_summary = {
-        "purpose": (
-            "Generate controlled nonlinear fake labels from a probabilistic "
-            "depth-two tree over prompt features, then fit a logistic student."
-        ),
-        "real_outcomes_used": False,
-        "threshold_fit_scope": "training prompt features only",
-        "depth": 2,
-        "nonlinearity": (
-            "alternating near-deterministic leaf probabilities create a "
-            "gated interaction that has no additive linear-logit form"
-        ),
-        "split_features": ["prompt_pc_1", "prompt_pc_2", "prompt_pc_3"],
-        "split_thresholds": tree_thresholds.tolist(),
-        "leaf_positive_probabilities": list(SYNTHETIC_TREE_LEAF_PROBABILITIES),
-        "label_sampling_seed": synthetic_seed,
-        "train_fake_positive_rate": float(np.mean(fake_train_outcomes)),
-        "validation_fake_positive_rate": float(np.mean(fake_validation_outcomes)),
-        "train_leaf_counts": np.bincount(train_leaf_ids, minlength=4).tolist(),
-        "validation_leaf_counts": np.bincount(
-            validation_leaf_ids, minlength=4
-        ).tolist(),
-    }
     summary = {
         "cache_schema_version": cache.manifest["schema_version"],
         "cache_examples": int(cache.manifest["examples"]),
@@ -369,15 +618,35 @@ def analyze_holdout_residuals(
             "residual": "observed binary label minus predicted probability",
             "reference": BINNED_RESIDUAL_REFERENCE,
         },
+        "residual_predictability": {
+            "purpose": (
+                "Visually test whether a nonlinear learner can predict the "
+                "direction of held-out logistic residuals without cancellation."
+            ),
+            "training_targets": (
+                "logistic residuals made out-of-fold inside the training split"
+            ),
+            "validation_usage": (
+                "validation outcomes are used only for final evaluation and "
+                "confidence intervals"
+            ),
+            "bin_count": residual_bin_count,
+            "binning": (
+                "equal-size validation bins ordered by signed Extra Trees "
+                "predicted residual"
+            ),
+            "forest_configuration": RESIDUAL_FOREST_CONFIGURATION,
+            "linear_comparator_configuration": LINEAR_RESIDUAL_CONFIGURATION,
+        },
         "scenarios": scenarios,
-        "synthetic_tree_teacher": teacher_summary,
+        "synthetic_forest_teacher": teacher_summary,
     }
     return {
         "summary": summary,
         "point_rows": all_points,
         "bin_rows": all_bins,
-        "tree_leaf_rows": tree_leaf_rows,
-        "tree_rules": _synthetic_tree_rules(tree_thresholds),
+        "residual_prediction_point_rows": all_residual_prediction_points,
+        "residual_prediction_bin_rows": all_residual_prediction_bins,
     }
 
 
@@ -410,7 +679,7 @@ def _plot_binned_residuals(path: Path, bin_rows: list[dict]) -> None:
     titles = {
         "uncertainty_hidden_logistic": "Uncertainty + hidden state",
         "prompt_logistic": "Prompt features",
-        "synthetic_tree_labels_logistic": "Tree-generated fake labels",
+        "synthetic_forest_labels_logistic": "Forest-generated fake labels",
     }
     for axis, scenario in zip(axes, scenarios):
         selected = [row for row in bin_rows if row["scenario"] == scenario]
@@ -434,32 +703,93 @@ def _plot_binned_residuals(path: Path, bin_rows: list[dict]) -> None:
     plt.close(figure)
 
 
-def _plot_tree_leaf_residuals(path: Path, leaf_rows: list[dict]) -> None:
+def _plot_residual_predictability(
+    path: Path,
+    bin_rows: list[dict],
+    scenarios: list[dict],
+) -> None:
+    """Plot held-out residual means after sorting by nonlinear corrections."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    leaf_ids = [row["tree_leaf_id"] for row in leaf_rows]
-    residuals = [row["mean_raw_residual"] for row in leaf_rows]
-    intervals = [1.96 * row["standard_error"] for row in leaf_rows]
-    figure, axis = plt.subplots(figsize=(7.2, 4.8), constrained_layout=True)
-    axis.errorbar(
-        leaf_ids,
-        residuals,
-        yerr=intervals,
-        color="#e45756",
-        marker="o",
-        markersize=7,
-        linewidth=2,
-        capsize=5,
+    scenario_names = list(dict.fromkeys(row["scenario"] for row in bin_rows))
+    if not scenario_names:
+        raise ValueError("Residual predictability plot requires bin rows")
+    metric_lookup = {row["scenario"]: row for row in scenarios}
+    figure, axes = plt.subplots(
+        1,
+        len(scenario_names),
+        figsize=(5.2 * len(scenario_names), 4.8),
+        sharex=True,
+        sharey=True,
+        constrained_layout=True,
     )
-    axis.axhline(0.0, color="black", linestyle="--", linewidth=1)
-    axis.set_xticks(leaf_ids)
-    axis.set_xlabel("Synthetic generating-tree leaf")
-    axis.set_ylabel(r"Mean raw residual $y - \hat{p}$")
-    axis.set_title("Logistic residuals within synthetic tree leaves")
-    axis.grid(alpha=0.2)
+    axes = np.atleast_1d(axes)
+    titles = {
+        "uncertainty_hidden_logistic": "Uncertainty + hidden state",
+        "prompt_logistic": "Prompt features",
+        "synthetic_forest_labels_logistic": "Forest-generated fake labels",
+    }
+    bounds = [0.0]
+    for row in bin_rows:
+        bounds.extend(
+            [
+                row["mean_predicted_residual"],
+                row["ci95_lower"],
+                row["ci95_upper"],
+            ]
+        )
+    limit = max(0.05, max(abs(value) for value in bounds) * 1.08)
+    for axis, scenario_name in zip(axes, scenario_names):
+        selected = [
+            row for row in bin_rows if row["scenario"] == scenario_name
+        ]
+        axis.errorbar(
+            [row["mean_predicted_residual"] for row in selected],
+            [row["mean_observed_residual"] for row in selected],
+            yerr=[1.96 * row["standard_error"] for row in selected],
+            color="#e45756",
+            marker="o",
+            linewidth=2,
+            capsize=4,
+            label="Bin mean and 95% interval",
+        )
+        axis.plot(
+            [-limit, limit],
+            [-limit, limit],
+            color="#4c78a8",
+            linestyle=":",
+            linewidth=1.5,
+            label="Ideal correction",
+        )
+        axis.axhline(0.0, color="black", linestyle="--", linewidth=1)
+        axis.axvline(0.0, color="grey", linewidth=0.8, alpha=0.7)
+        metric = metric_lookup[scenario_name]["residual_predictability"]
+        axis.set_title(titles.get(scenario_name, scenario_name))
+        axis.text(
+            0.03,
+            0.97,
+            (
+                f"Forest ΔMSE vs zero: "
+                f"{metric['forest_mse_improvement_vs_zero']:+.4f}\n"
+                f"Forest ΔMSE vs linear: "
+                f"{metric['forest_mse_improvement_vs_linear']:+.4f}"
+            ),
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none"},
+        )
+        axis.set_xlim(-limit, limit)
+        axis.set_ylim(-limit, limit)
+        axis.set_xlabel("Mean forest-predicted logistic residual")
+        axis.grid(alpha=0.2)
+    axes[0].set_ylabel("Mean observed held-out logistic residual")
+    axes[0].legend(fontsize=8, loc="lower right")
+    figure.suptitle("Held-out nonlinear residual predictability")
     figure.savefig(path, dpi=180)
     plt.close(figure)
 
@@ -482,6 +812,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         cache,
         validation_fraction=args.validation_fraction,
         seed=args.seed,
+        residual_bin_count=args.residual_bin_count,
     )
     result["summary"]["cache"] = str(args.cache.resolve())
     output = args.output_dir.resolve()
@@ -492,19 +823,22 @@ def main(argv: Iterable[str] | None = None) -> int:
     _write_csv(output / "validation_residuals.csv", result["point_rows"])
     _write_csv(output / "binned_residuals.csv", result["bin_rows"])
     _write_csv(
-        output / "synthetic_tree_leaf_residuals.csv", result["tree_leaf_rows"]
+        output / "residual_predictability.csv",
+        result["residual_prediction_point_rows"],
     )
-    (output / "synthetic_tree_rules.txt").write_text(
-        result["tree_rules"], encoding="utf-8"
+    _write_csv(
+        output / "residual_predictability_bins.csv",
+        result["residual_prediction_bin_rows"],
     )
     _plot_binned_residuals(output / "binned_residuals.png", result["bin_rows"])
-    _plot_tree_leaf_residuals(
-        output / "synthetic_tree_leaf_residuals.png",
-        result["tree_leaf_rows"],
+    _plot_residual_predictability(
+        output / "residual_predictability.png",
+        result["residual_prediction_bin_rows"],
+        result["summary"]["scenarios"],
     )
     bundle = _bundle(output)
     print(
-        f"Finished three holdout residual analyses. Results: {bundle}",
+        f"Finished three held-out residual analyses. Results: {bundle}",
         flush=True,
     )
     return 0

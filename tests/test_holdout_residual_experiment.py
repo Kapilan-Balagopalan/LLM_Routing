@@ -6,6 +6,7 @@ import numpy as np
 
 from llm_routing_simulation.cache import RoutingCache
 from llm_routing_simulation.residual_experiment import (
+    _heldout_residual_predictability,
     _parser,
     analyze_holdout_residuals,
     main,
@@ -70,21 +71,34 @@ def test_holdout_residual_analysis_uses_manifest_blocks_and_shared_split():
     assert summary["split"]["train_examples"] == 60
     assert summary["split"]["validation_examples"] == 60
     assert summary["binning"]["bin_count"] == 8
+    assert summary["residual_predictability"]["bin_count"] == 10
     scenarios = {row["scenario"]: row for row in summary["scenarios"]}
     assert scenarios["uncertainty_hidden_logistic"]["context_dimension"] == 5
     assert scenarios["prompt_logistic"]["context_dimension"] == 3
-    assert scenarios["synthetic_tree_labels_logistic"]["context_dimension"] == 3
+    assert scenarios["synthetic_forest_labels_logistic"]["context_dimension"] == 3
     assert len(result["point_rows"]) == 3 * 60
     assert len(result["bin_rows"]) == 3 * 8
-    assert result["tree_leaf_rows"]
-    assert all("ci95_lower" in row for row in result["tree_leaf_rows"])
-    assert "prompt_pc_" in result["tree_rules"]
-    assert summary["synthetic_tree_teacher"]["real_outcomes_used"] is False
+    assert len(result["residual_prediction_point_rows"]) == 3 * 60
+    assert len(result["residual_prediction_bin_rows"]) == 3 * 10
+    assert all(
+        "ci95_lower" in row for row in result["residual_prediction_bin_rows"]
+    )
+    teacher = summary["synthetic_forest_teacher"]
+    assert teacher["real_outcomes_used"] is False
+    assert teacher["input_feature_count"] == 3
+    assert teacher["configuration"]["n_estimators"] == 50
+    assert teacher["configuration"]["max_depth"] == 4
+    assert len(teacher["feature_importances"]) == 3
+    for scenario in scenarios.values():
+        diagnostic = scenario["residual_predictability"]
+        assert diagnostic["training_residual_inner_folds"] >= 2
+        assert np.isfinite(diagnostic["forest_residual_mse"])
+        assert np.isfinite(diagnostic["linear_residual_mse"])
     assert {
         row["label_source"] for row in result["point_rows"]
     } == {
         "cached_weak_strong_disagreement",
-        "synthetic_probabilistic_tree",
+        "synthetic_probabilistic_forest",
     }
 
     positions_by_scenario = {}
@@ -99,6 +113,7 @@ def test_holdout_residual_cli_defaults_and_outputs(tmp_path):
     args = _parser().parse_args(["--cache", "fixture.zip"])
     assert args.validation_fraction == 0.5
     assert args.seed == 0
+    assert args.residual_bin_count == 10
 
     cache_path = tmp_path / "cache.zip"
     output = tmp_path / "results"
@@ -119,9 +134,50 @@ def test_holdout_residual_cli_defaults_and_outputs(tmp_path):
         "validation_residuals.csv",
         "binned_residuals.csv",
         "binned_residuals.png",
-        "synthetic_tree_leaf_residuals.csv",
-        "synthetic_tree_leaf_residuals.png",
-        "synthetic_tree_rules.txt",
+        "residual_predictability.csv",
+        "residual_predictability_bins.csv",
+        "residual_predictability.png",
         "holdout-residual-results.zip",
     }
     assert expected == {path.name for path in output.iterdir()}
+
+
+def test_residual_predictions_do_not_fit_validation_outcomes():
+    rng = np.random.default_rng(31)
+    train_contexts = rng.normal(size=(80, 5))
+    validation_contexts = rng.normal(size=(40, 5))
+    train_outcomes = np.tile([0, 1], 40)
+    validation_outcomes = np.tile([0, 1], 20)
+    validation_probabilities = np.linspace(0.2, 0.8, 40)
+
+    original, _, _ = _heldout_residual_predictability(
+        train_contexts,
+        validation_contexts,
+        train_outcomes,
+        validation_outcomes,
+        validation_probabilities,
+        bin_count=5,
+        seed=9,
+    )
+    flipped, _, _ = _heldout_residual_predictability(
+        train_contexts,
+        validation_contexts,
+        train_outcomes,
+        1 - validation_outcomes,
+        validation_probabilities,
+        bin_count=5,
+        seed=9,
+    )
+
+    assert np.allclose(
+        [row["forest_predicted_residual"] for row in original],
+        [row["forest_predicted_residual"] for row in flipped],
+    )
+    assert np.allclose(
+        [row["linear_predicted_residual"] for row in original],
+        [row["linear_predicted_residual"] for row in flipped],
+    )
+    assert not np.allclose(
+        [row["observed_logistic_residual"] for row in original],
+        [row["observed_logistic_residual"] for row in flipped],
+    )
