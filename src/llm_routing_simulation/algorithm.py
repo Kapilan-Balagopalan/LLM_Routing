@@ -1,4 +1,4 @@
-"""Online players: RBF-SVM ETC/IGW and logistic CBPSide."""
+"""Online players: HGB ETC/IGW and linear-logistic CBPSide."""
 
 from __future__ import annotations
 
@@ -10,12 +10,15 @@ import numpy as np
 from llm_routing_simulation.player import HistoryBasedPlayer, PlayerDecision
 
 
-ONLINE_RBF_SVM_PROFILE = {
-    "name": "RBF SVM",
-    "C": 1.0,
-    "gamma": "scale",
-    "probability": True,
-    "preprocessing": "training-history StandardScaler",
+ONLINE_HGB_PROFILE = {
+    "name": "HGB",
+    "loss": "log_loss",
+    "learning_rate": 0.05,
+    "max_iter": 50,
+    "max_leaf_nodes": 15,
+    "min_samples_leaf": 20,
+    "l2_regularization": 1.0,
+    "early_stopping": False,
 }
 
 
@@ -456,39 +459,30 @@ class RevealedFeedbackEstimator:
         return probability, tasted_count, True, classes
 
 
-class RBFSVMEstimator(RevealedFeedbackEstimator):
-    """Calibrated RBF-SVM disagreement estimator for prompt-PCA contexts."""
+class HGBEstimator(RevealedFeedbackEstimator):
+    """Histogram gradient-boosting estimator for prompt-PCA contexts."""
 
     @property
     def estimator_name(self) -> str:
-        return "rbf_svm"
+        return "hist_gradient_boosting"
 
     def _new_model(self):
-        from sklearn.pipeline import make_pipeline
-        from sklearn.preprocessing import StandardScaler
-        from sklearn.svm import SVC
+        from sklearn.ensemble import HistGradientBoostingClassifier
 
-        return make_pipeline(
-            StandardScaler(),
-            SVC(
-                C=ONLINE_RBF_SVM_PROFILE["C"],
-                gamma=ONLINE_RBF_SVM_PROFILE["gamma"],
-                probability=ONLINE_RBF_SVM_PROFILE["probability"],
-                random_state=self.seed,
-            ),
+        return HistGradientBoostingClassifier(
+            loss=ONLINE_HGB_PROFILE["loss"],
+            learning_rate=ONLINE_HGB_PROFILE["learning_rate"],
+            max_iter=ONLINE_HGB_PROFILE["max_iter"],
+            max_leaf_nodes=ONLINE_HGB_PROFILE["max_leaf_nodes"],
+            min_samples_leaf=ONLINE_HGB_PROFILE["min_samples_leaf"],
+            l2_regularization=ONLINE_HGB_PROFILE["l2_regularization"],
+            early_stopping=ONLINE_HGB_PROFILE["early_stopping"],
+            random_state=self.seed,
         )
 
-    def _fit_model(
-        self,
-        features: np.ndarray,
-        labels: np.ndarray,
-        sample_weights: np.ndarray,
-    ) -> None:
-        self.model.fit(features, labels, svc__sample_weight=sample_weights)
 
-
-class RBFSVMETCPlayer(HistoryBasedPlayer):
-    """Explore-then-commit using a frozen calibrated RBF-SVM model."""
+class HGBETCPlayer(HistoryBasedPlayer):
+    """Explore-then-commit using one frozen HGB fit."""
 
     def __init__(
         self,
@@ -501,7 +495,7 @@ class RBFSVMETCPlayer(HistoryBasedPlayer):
         super().__init__(context_dim)
         self.config = config
         self.min_tastes = config.min_tastes
-        self.estimator = RBFSVMEstimator(
+        self.estimator = HGBEstimator(
             context_dim, max_features=estimator_max_features, seed=seed
         )
         self.last_decision: ETCDecision | None = None
@@ -533,7 +527,7 @@ class RBFSVMETCPlayer(HistoryBasedPlayer):
             action, reason = 1, "forced_exploration"
         else:
             action = int(predicted >= self.threshold)
-            reason = "rbf_svm_threshold"
+            reason = "hgb_threshold"
         decision = ETCDecision(
             action=action,
             predicted_disagreement=predicted,
@@ -615,7 +609,7 @@ class IGWPlayer(HistoryBasedPlayer):
                 "IGW requires N>0, min_tastes>=0, mu>=2, positive gamma, "
                 "nonnegative bootstrap settings, and min propensity in (0,1]"
             )
-        self.estimator = RBFSVMEstimator(
+        self.estimator = HGBEstimator(
             context_dim, max_features=estimator_max_features, seed=seed
         )
         self.config = config

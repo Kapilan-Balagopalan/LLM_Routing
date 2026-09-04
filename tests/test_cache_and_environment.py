@@ -5,7 +5,7 @@ import zipfile
 import numpy as np
 
 from llm_routing_simulation.cache import load_cache
-from llm_routing_simulation.environment import LLMCascadeEnvironment
+from llm_routing_simulation.environment import CascadeRound, LLMCascadeEnvironment
 
 
 def _fixture_cache(path, schema_version="llm-routing-cache-v1"):
@@ -108,3 +108,24 @@ def test_manifest_context_block_selection():
     assert np.array_equal(selected, contexts[:, 2:5])
     assert metadata["available_components"] == 4
     assert metadata["selected_components"] == 3
+
+
+def test_environment_hides_and_reveals_synthetic_outcome_override():
+    synthetic_round = CascadeRound(
+        example_id="synthetic",
+        prompt="prompt",
+        context=np.asarray([0.2, -0.1]),
+        weak_answer="A",
+        strong_answer="A",
+        gold_answer="A",
+        outcome_override=1,
+    )
+    hidden_environment = LLMCascadeEnvironment([synthetic_round])
+    hidden_environment.observe()
+    assert hidden_environment.step(0).outcome is None
+
+    revealed_environment = LLMCascadeEnvironment([synthetic_round])
+    revealed_environment.observe()
+    transition = revealed_environment.step(1)
+    assert transition.outcome == 1
+    assert synthetic_round.routing_outcome == 1

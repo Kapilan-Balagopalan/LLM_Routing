@@ -141,10 +141,11 @@ def test_prompt_context_rounds_use_manifest_block_before_limit():
         },
     )
 
-    rounds, summary = _prompt_context_rounds(
+    rounds, summary, teacher_summary, synthetic_rows = _prompt_context_rounds(
         cache,
         prompt_components=4,
         limit=3,
+        seed=0,
     )
     assert len(rounds) == 3
     assert all(round_.context.shape == (4,) for round_ in rounds)
@@ -157,6 +158,17 @@ def test_prompt_context_rounds_use_manifest_block_before_limit():
     assert summary["context_block"]["stop"] == 8
     assert summary["outcome_or_answer_features_used"] is False
     assert summary["fit_scope"] == "precomputed across all collected prompts"
+    assert teacher_summary["examples"] == 6
+    assert teacher_summary["selected_examples"] == 3
+    assert len(synthetic_rows) == 3
+    assert [row["id"] for row in synthetic_rows] == [
+        "arc-0",
+        "arc-1",
+        "arc-2",
+    ]
+    assert [round_.routing_outcome for round_ in rounds] == [
+        row["synthetic_outcome"] for row in synthetic_rows
+    ]
 
 
 def test_compact_context_is_14_uncertainty_plus_32_prompt_dimensions():

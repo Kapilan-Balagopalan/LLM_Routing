@@ -12,7 +12,7 @@ decision.
 | `experiment/synthetic-sanity` | Controlled nonlinear `x1*x2` sanity check |
 | `experiment/residual-diagnostics` | Real-data model-specification diagnostics |
 | `experiment/prompt-embedding` | Incremental semantic prompt-feature test |
-| `experiment/prompt-routing` | Prompt-only 64D skyline and online routing |
+| `experiment/prompt-routing` | Prompt-only nonlinear-label routing positive control |
 | `backup/current-combined` | Recovery snapshot before branch separation |
 
 Initial combined checkpoint: tag `current-combined-v1`, commit `3905bbf`.
@@ -85,6 +85,70 @@ The primary skyline figure is intentionally restricted to logistic, RBF SVM,
 and expected random routing so it directly displays the linear-versus-nonlinear
 hypothesis. All other supervised models are still evaluated and retained in the
 result tables, but omitted from the plot to avoid an overfilled legend.
+
+### Multifeature forest routing positive control, 2026-09-03
+
+Branch: `experiment/prompt-routing`
+
+The prompt-only real-label experiment did not show a large nonlinear advantage.
+That result alone cannot distinguish weak signal from an implementation or
+parameter-alignment error in the routing pipeline. This follow-up is therefore
+a deliberately artificial positive control. Its results must not be reported as
+real ARC or LLM-routing performance.
+
+Data and synthetic environment:
+
+- source cache: `llm-routing-cache-full.zip`, schema v2, with 5,173 collected
+  rows and all 5,138 eligible rows retained;
+- context: the complete 64D `prompt_embedding_pca` block located through
+  `manifest.json -> context_blocks`; uncertainty and hidden-state features are
+  excluded;
+- teacher: a 50-tree random-forest regressor with maximum depth 4, minimum leaf
+  size 10, and 75% feature subsampling, fitted to a deterministic nonlinear
+  target constructed from standardized prompt PCs 1--12;
+- probabilities: the teacher score is converted to a stronger nonlinear logit
+  with scale 2.5 and clipped to `[0.02, 0.98]`;
+- labels: one seeded Bernoulli draw creates a frozen synthetic outcome for every
+  eligible row. The default teacher and label seeds are respectively 9000 and
+  10000 when the experiment seed is zero;
+- leakage boundary: teacher construction is transductive and uses all prompt
+  contexts, but is outcome-free. It uses no real weak/strong disagreement,
+  model answer, ARC gold answer, or supervised split label.
+
+The same frozen synthetic outcomes are used in two separate evaluations:
+
+1. Supervised skyline: one stratified 4:1 train-validation split. Linear
+   logistic and HGB are fitted only on the training 80% and evaluated only on
+   the validation 20%. The HGB configuration exactly matches the online HGB
+   profile. The plot contains logistic, HGB, and expected random only.
+2. Online routing: all 5,138 eligible rows arrive sequentially; there is no
+   supervised pretraining subset. Action `0` hides the synthetic outcome and
+   action `1` reveals it, preserving the normal partial-feedback protocol.
+
+Online player configuration:
+
+- ETC + HGB: 300 forced tastes, fit once, then freeze;
+- IGW + online-refitted HGB: no forced tastes and no class bootstrap, `mu=2`,
+  fixed `gamma=16`, with inverse-propensity weights capped at 10;
+- CBPSide + linear logistic: no forced tastes and no class bootstrap;
+- cold start: before both classes have enough revealed observations, estimators
+  use only a neutral Laplace-smoothed constant probability, not hidden labels;
+- random: matched to ETC's realized action-1 traffic;
+- online score: correctness against the synthetic routing outcome, not cached
+  strong-model answer accuracy or ARC gold-answer accuracy.
+
+Planned full command (not executed while implementing):
+
+```powershell
+simulate-llm-routing `
+  --cache llm-routing-cache-full.zip `
+  --experiment all `
+  --skyline-validation-fraction 0.2 `
+  --output-dir prompt-forest-sanity-results
+```
+
+No numerical conclusion is recorded until the user runs this command and the
+result bundle is inspected.
 
 ### Nonlinear synthetic sanity check
 

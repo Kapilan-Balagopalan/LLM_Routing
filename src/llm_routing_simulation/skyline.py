@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from llm_routing_simulation.algorithm import ONLINE_HGB_PROFILE
+
 
 HGB_CAPACITY_PROFILES = (
     {
@@ -261,6 +263,141 @@ def threshold_skyline(
             }
         )
     return rows
+
+
+def fit_holdout_prompt_skylines(
+    contexts: np.ndarray,
+    disagreements: np.ndarray,
+    *,
+    validation_fraction: float = 0.2,
+    seed: int = 0,
+) -> tuple[list[dict], dict, list[dict]]:
+    """Fit the positive-control logistic and HGB skyline on an 80/20 split."""
+    try:
+        from sklearn.ensemble import HistGradientBoostingClassifier
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.model_selection import train_test_split
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+    except ImportError as exc:
+        raise RuntimeError(
+            "Holdout skylines require the project's scikit-learn dependency"
+        ) from exc
+
+    X = np.asarray(contexts, dtype=np.float64)
+    y = np.asarray(disagreements, dtype=np.int64).reshape(-1)
+    if X.ndim != 2 or X.shape[0] == 0 or X.shape[0] != y.size:
+        raise ValueError("Contexts must be a nonempty matrix aligned with outcomes")
+    if not np.all(np.isfinite(X)) or np.any((y != 0) & (y != 1)):
+        raise ValueError("Contexts must be finite and outcomes binary")
+    if np.unique(y).size != 2:
+        raise ValueError("Holdout skylines require both outcome classes")
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be strictly between zero and one")
+
+    positions = np.arange(y.size)
+    train_positions, validation_positions = train_test_split(
+        positions,
+        test_size=validation_fraction,
+        random_state=seed,
+        stratify=y,
+    )
+    logistic = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(C=1.0, solver="lbfgs", max_iter=5000),
+    )
+    logistic.fit(X[train_positions], y[train_positions])
+    logistic_probabilities = logistic.predict_proba(X[validation_positions])[:, 1]
+
+    hgb = HistGradientBoostingClassifier(
+        loss=ONLINE_HGB_PROFILE["loss"],
+        learning_rate=ONLINE_HGB_PROFILE["learning_rate"],
+        max_iter=ONLINE_HGB_PROFILE["max_iter"],
+        max_leaf_nodes=ONLINE_HGB_PROFILE["max_leaf_nodes"],
+        min_samples_leaf=ONLINE_HGB_PROFILE["min_samples_leaf"],
+        l2_regularization=ONLINE_HGB_PROFILE["l2_regularization"],
+        early_stopping=ONLINE_HGB_PROFILE["early_stopping"],
+        random_state=seed,
+    )
+    hgb.fit(X[train_positions], y[train_positions])
+    hgb_probabilities = hgb.predict_proba(X[validation_positions])[:, 1]
+
+    names_and_probabilities = (
+        ("Logistic (80/20 holdout)", logistic_probabilities),
+        ("HGB (80/20 holdout)", hgb_probabilities),
+    )
+    validation_outcomes = y[validation_positions]
+    metrics = {
+        name: evaluate_probability_predictions(probabilities, validation_outcomes)
+        for name, probabilities in names_and_probabilities
+    }
+    logistic_metrics = metrics["Logistic (80/20 holdout)"]
+    comparison = []
+    rows = []
+    configurations = {
+        "Logistic (80/20 holdout)": {
+            "C": 1.0,
+            "solver": "lbfgs",
+            "max_iter": 5000,
+            "preprocessing": "training-split StandardScaler",
+        },
+        "HGB (80/20 holdout)": ONLINE_HGB_PROFILE,
+    }
+    for name, probabilities in names_and_probabilities:
+        model_metrics = metrics[name]
+        comparison.append(
+            {
+                "model": name,
+                **model_metrics,
+                "delta_auc_vs_logistic": (
+                    model_metrics["roc_auc"] - logistic_metrics["roc_auc"]
+                ),
+                "delta_log_loss_vs_logistic": (
+                    model_metrics["log_loss"] - logistic_metrics["log_loss"]
+                ),
+                "delta_brier_vs_logistic": (
+                    model_metrics["brier_score"] - logistic_metrics["brier_score"]
+                ),
+                "configuration": configurations[name],
+            }
+        )
+        rows.extend(
+            threshold_skyline(
+                probabilities,
+                validation_outcomes,
+                name,
+                fit_scope="stratified_80_20_holdout",
+                evaluation_auc=model_metrics["roc_auc"],
+                configuration=configurations[name],
+                selected=True,
+            )
+        )
+
+    prediction_rows = [
+        {
+            "example_index": int(position),
+            "split": "validation",
+            "synthetic_outcome": int(y[position]),
+            "logistic_probability": float(logistic_probabilities[index]),
+            "hgb_probability": float(hgb_probabilities[index]),
+        }
+        for index, position in enumerate(validation_positions)
+    ]
+    summary = {
+        "fit_scope": "single stratified 80/20 train-validation holdout",
+        "seed": seed,
+        "validation_fraction": validation_fraction,
+        "train_examples": int(train_positions.size),
+        "validation_examples": int(validation_positions.size),
+        "context_dimension": int(X.shape[1]),
+        "outcome_source": "synthetic_probabilistic_prompt_forest",
+        "validation_positive_rate": float(np.mean(validation_outcomes)),
+        "validation_agreement_rate": float(np.mean(validation_outcomes == 0)),
+        "model_comparison": comparison,
+        "plot_models": [name for name, _ in names_and_probabilities]
+        + ["Random routing (expected)"],
+    }
+    return rows, summary, prediction_rows
 
 
 def fit_supervised_skylines(

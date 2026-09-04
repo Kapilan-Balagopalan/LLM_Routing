@@ -2,11 +2,11 @@
 
 This project reads the one-time cache produced by `Data_collection_LLM_routing`.
 It does not load an LLM, contact Hugging Face, need an `HF_TOKEN`, or require a
-GPU. The cached strong answer is retained as the evaluation reference, while
-the environment still hides that answer and the disagreement outcome whenever
-an online player chooses action 0. The optional prompt-embedding command is the
-one exception: when explicitly run, it downloads or loads a small frozen text
-encoder and performs local inference; it never reruns the weak or strong LLM.
+GPU. On `experiment/prompt-routing`, the cached 64D prompt block drives a
+synthetic-label positive control: a fixed multifeature forest defines fake
+disagreement outcomes so the supervised and partial-feedback routing
+implementations can be sanity-checked independently of real-data signal
+strength.
 
 ## Set up on the laptop
 
@@ -39,14 +39,14 @@ simulate-llm-routing `
 
 The useful choices are:
 
-- `--experiment skyline`: out-of-fold logistic and five HGB capacity skylines
-  (HGB-30 through HGB-350), plus compact MLP-4 and MLP-8 neural skylines,
-  elastic-net logistic, Extra Trees, calibrated RBF SVM, and—when the
-  `benchmark` extra is installed—XGBoost and CatBoost. It also includes the
-  analytic random-routing reference.
-- `--experiment online`: RBF-SVM ETC, logistic CBPSide, fixed-gamma-16
-  RBF-SVM IGW, and random routing matched to ETC traffic.
-- `--experiment all`: both groups (the default).
+- `--experiment skyline`: a separate supervised 80/20 train-validation
+  comparison of linear logistic, the same HGB profile used online, and the
+  analytic expected-random reference.
+- `--experiment online`: HGB ETC, linear-logistic CBPSide, HGB IGW, and random
+  routing matched to ETC traffic. With no `--limit`, all 5,138 eligible samples
+  are online rounds; there is no supervised training subset.
+- `--experiment all`: run both separate evaluations against the same frozen
+  synthetic outcome vector (the default).
 
 Results go to `simulation-results/`, including CSV/JSON tables, the full online
 trajectory, `routing_comparison.png`, and a portable `simulation-results.zip`.
@@ -54,29 +54,11 @@ Each execution refits all estimators from the cached samples; no LLM generation
 is repeated. You can run new seeds, loss values, thresholds and algorithms many
 times against the same cache.
 
-For readability, `routing_comparison.png` plots only logistic, RBF SVM, and the
-expected random reference in its supervised skyline panel. Metrics and skyline
-points for every fitted diagnostic model remain available in
-`supervised_model_comparison.csv` and `supervised_skyline.csv`.
-
-Skyline runs also create `supervised_residual_plots.png`. Its three panels use
-strictly out-of-fold predictions from linear logistic, the HGB capacity selected
-by out-of-fold AUC, and the MLP capacity selected by out-of-fold AUC. Individual
-binary residuals use `y - predicted_probability`; red points show equal-frequency
-bin means with 95% intervals. A model is better specified when those red points
-remain near the zero line without systematic curvature. The underlying raw,
-Pearson, and deviance residuals are saved in `supervised_residuals.csv`, and the
-bin summaries are saved in `supervised_residual_bins.csv`.
-
-The residual branch additionally asks whether the original context contains
-nonlinear signal left over after logistic regression. A nested cross-fitted HGB
-regressor predicts logistic residuals without seeing the evaluated outer fold.
-Its held-out mean-squared error is compared with predicting a zero residual, and
-100 shuffled-training-residual refits provide a one-sided permutation reference.
-Results are saved in `residual_predictability_summary.json`, three accompanying
-CSV files, and `residual_predictability.png`. Use
-`--residual-permutations 0` for a fast diagnostic without the permutation test,
-or another nonnegative count to control its precision and runtime.
+`routing_comparison.png` keeps the two tasks in separate panels. The supervised
+panel plots only logistic, HGB, and expected random. Exact validation
+probabilities are saved in `supervised_holdout_predictions.csv`; all skyline
+points and model metrics remain in CSV and JSON. `synthetic_outcomes.csv`
+records the common teacher probability and sampled fake label for every round.
 
 ## Current defaults
 
@@ -84,20 +66,18 @@ or another nonnegative count to control its precision and runtime.
   the v2 cache manifest. Weak-model uncertainty and hidden-state PCA blocks are
   not used.
 - Loss values: `l01 = 1.82, 2.22, 2.67, 3.33`, `l11 = 1`.
-- ETC: 300 initial tastes, then a frozen calibrated RBF-SVM estimator.
+- Synthetic teacher: 50 depth-four random-forest trees using prompt PCs 1--12;
+  fixed seed 9000 and Bernoulli label seed 10000 by default. It uses no real
+  disagreement labels, answers, or ARC gold labels.
+- ETC: 300 initial tastes, then one frozen HGB estimator.
 - CBPSide: regularized linear logistic regression with no forced tastes and no
   class bootstrap.
-- IGW: online-refitted calibrated RBF SVM, `mu = 2`, fixed `gamma = 16`, no
+- IGW: online-refitted HGB, `mu = 2`, fixed `gamma = 16`, no
   forced tastes or class bootstrap, and inverse-propensity weights capped at 10.
-- Accuracy: agreement with the strong-model answer, not ARC ground truth.
-- Neural skyline diagnostics remain supervised comparisons and are not used by
-  the online players.
-- Supervised model comparison reports ROC AUC, log loss, Brier score,
-  ten-bin calibration error, and routing accuracy at 50% traffic. Install the
-  optional tree libraries with `python -m pip install -e ".[benchmark,test]"`.
-- RBF SVM is connected to ETC and IGW to test nonlinear prediction in the
-  prompt-only context; CBPSide remains logistic. The other models remain
-  supervised skyline diagnostics.
+- Online accuracy: route every synthetic disagreement correctly and retain the
+  weak action for every synthetic agreement. It is not real LLM answer accuracy.
+- Supervised skyline: one stratified 4:1 split, with HGB and logistic fit only on
+  the training 80% and evaluated only on the validation 20%.
 
 Pass alternatives on the command line, for example:
 

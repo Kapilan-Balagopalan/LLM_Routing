@@ -1,18 +1,19 @@
 import numpy as np
 
 from llm_routing_simulation.algorithm import (
-    ONLINE_RBF_SVM_PROFILE,
+    ONLINE_HGB_PROFILE,
+    HGBETCPlayer,
+    HGBEstimator,
     IGWPlayer,
     LogCBPSideAT,
     LogCBPSideATConfig,
-    RBFSVMETCPlayer,
-    RBFSVMEstimator,
 )
 from llm_routing_simulation.skyline import (
     HGB_CAPACITY_PROFILES,
     MLP_CAPACITY_PROFILES,
     binary_residual_diagnostics,
     cross_fitted_residual_predictability,
+    fit_holdout_prompt_skylines,
     plot_binary_residuals,
     plot_residual_predictability,
 )
@@ -28,27 +29,78 @@ def test_skyline_stops_at_hgb_350():
 
 def test_main_skyline_plot_is_limited_to_research_comparison():
     assert SKYLINE_PLOT_MODELS == (
-        "Logistic (out-of-fold)",
-        "RBF SVM (out-of-fold)",
+        "Logistic (80/20 holdout)",
+        "HGB (80/20 holdout)",
         "Random routing (expected)",
     )
 
 
-def test_online_etc_and_igw_use_rbf_svm_configuration():
-    assert ONLINE_RBF_SVM_PROFILE == {
-        "name": "RBF SVM",
-        "C": 1.0,
-        "gamma": "scale",
-        "probability": True,
-        "preprocessing": "training-history StandardScaler",
+def test_online_etc_and_igw_use_hgb_configuration():
+    assert ONLINE_HGB_PROFILE == {
+        "name": "HGB",
+        "loss": "log_loss",
+        "learning_rate": 0.05,
+        "max_iter": 50,
+        "max_leaf_nodes": 15,
+        "min_samples_leaf": 20,
+        "l2_regularization": 1.0,
+        "early_stopping": False,
     }
     config = LogCBPSideATConfig()
-    etc = RBFSVMETCPlayer(8, config)
+    etc = HGBETCPlayer(8, config)
     igw = IGWPlayer(8, config, 100, fixed_gamma=16.0)
-    assert isinstance(etc.estimator, RBFSVMEstimator)
-    assert etc.estimator.estimator_name == "rbf_svm"
-    assert isinstance(igw.estimator, RBFSVMEstimator)
-    assert igw.estimator.estimator_name == "rbf_svm"
+    assert isinstance(etc.estimator, HGBEstimator)
+    assert etc.estimator.estimator_name == "hist_gradient_boosting"
+    assert isinstance(igw.estimator, HGBEstimator)
+    assert igw.estimator.estimator_name == "hist_gradient_boosting"
+
+
+def test_hgb_etc_fits_after_exact_taste_budget_and_then_freezes():
+    config = LogCBPSideATConfig(min_tastes=4, use_confidence_bound=False)
+    player = HGBETCPlayer(2, config, seed=5)
+    contexts = [
+        np.asarray([0.1, 0.2]),
+        np.asarray([-0.2, 0.3]),
+        np.asarray([0.4, -0.1]),
+        np.asarray([-0.3, -0.2]),
+    ]
+    for context, outcome in zip(contexts, [0, 1, 0, 1]):
+        decision = player.next_action(context)
+        assert decision.action == 1
+        assert decision.diagnostics.reason == "forced_exploration"
+        player.update(1, context, outcome)
+
+    post_taste = np.asarray([0.5, 0.5])
+    decision = player.next_action(post_taste)
+    assert decision.diagnostics.estimator_fitted is True
+    assert decision.diagnostics.training_count == 4
+    fitted_model = player.estimator.model
+    player.update(
+        decision.action,
+        post_taste,
+        1 if decision.action == 1 else None,
+    )
+    next_context = np.asarray([0.6, -0.4])
+    next_decision = player.next_action(next_context)
+    assert next_decision.diagnostics.training_count == 4
+    assert player.estimator.model is fitted_model
+
+
+def test_igw_has_no_implicit_forced_taste_when_configured_zero():
+    config = LogCBPSideATConfig(min_tastes=0)
+    player = IGWPlayer(
+        2,
+        config,
+        total_samples=20,
+        min_tastes=0,
+        bootstrap_per_class=0,
+        bootstrap_max_tastes=0,
+        fixed_gamma=16.0,
+        seed=8,
+    )
+    decision = player.next_action(np.asarray([0.1, -0.2])).diagnostics
+    assert decision.reason == "inverse_gap_weighting"
+    assert 0.0 < decision.probability_1 < 1.0
 
 
 def test_cbpside_class_bootstrap_until_balanced_or_capped():
@@ -81,7 +133,35 @@ def test_online_exploration_defaults():
     assert args.igw_bootstrap_max_tastes == 0
     assert args.igw_mu == 2.0
     assert args.igw_gamma == 16.0
-    assert args.residual_permutations == 100
+    assert args.skyline_validation_fraction == 0.2
+
+
+def test_holdout_prompt_skyline_uses_four_to_one_split():
+    rng = np.random.default_rng(41)
+    contexts = rng.normal(size=(200, 8))
+    outcomes = ((contexts[:, 0] * contexts[:, 1]) > 0.0).astype(np.int64)
+
+    rows, summary, predictions = fit_holdout_prompt_skylines(
+        contexts,
+        outcomes,
+        validation_fraction=0.2,
+        seed=4,
+    )
+
+    assert summary["train_examples"] == 160
+    assert summary["validation_examples"] == 40
+    assert summary["fit_scope"] == "single stratified 80/20 train-validation holdout"
+    assert len(predictions) == 40
+    assert {row["model"] for row in rows} == {
+        "Logistic (80/20 holdout)",
+        "HGB (80/20 holdout)",
+    }
+    assert {
+        row["model"] for row in summary["model_comparison"]
+    } == {
+        "Logistic (80/20 holdout)",
+        "HGB (80/20 holdout)",
+    }
 
 
 def test_compact_mlp_capacity_sweep():

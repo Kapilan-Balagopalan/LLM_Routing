@@ -15,6 +15,18 @@ class CascadeRound:
     weak_answer: str
     strong_answer: str
     gold_answer: str
+    outcome_override: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.outcome_override not in (0, 1, None):
+            raise ValueError("outcome_override must be 0, 1, or None")
+
+    @property
+    def routing_outcome(self) -> int:
+        """Return the environment outcome, synthetic when explicitly supplied."""
+        if self.outcome_override is not None:
+            return self.outcome_override
+        return int(self.weak_answer != self.strong_answer)
 
 
 @dataclass(frozen=True)
@@ -69,7 +81,7 @@ class LLMCascadeEnvironment:
             raise ValueError("Action must be 0 or 1")
         item = self.rounds[self.index]
         if action == 1:
-            outcome = int(item.weak_answer != item.strong_answer)
+            outcome = item.routing_outcome
             revealed_strong = item.strong_answer
         else:
             outcome = None
@@ -83,4 +95,3 @@ class LLMCascadeEnvironment:
         )
         self.index += 1
         return transition
-

@@ -13,26 +13,25 @@ from typing import Any, Iterable
 import numpy as np
 
 from llm_routing_simulation.algorithm import (
+    HGBETCPlayer,
     IGWPlayer,
     LogCBPSideATConfig,
     LogCBPSideATPlayer,
-    RBFSVMETCPlayer,
 )
 from llm_routing_simulation.cache import RoutingCache, load_cache
 from llm_routing_simulation.environment import LLMCascadeEnvironment
 from llm_routing_simulation.skyline import (
-    binary_residual_diagnostics,
-    cross_fitted_residual_predictability,
-    fit_supervised_skylines,
-    plot_binary_residuals,
-    plot_residual_predictability,
+    fit_holdout_prompt_skylines,
     random_routing_reference,
+)
+from llm_routing_simulation.synthetic_prompt import (
+    generate_synthetic_prompt_outcomes,
 )
 
 
 SKYLINE_PLOT_MODELS = (
-    "Logistic (out-of-fold)",
-    "RBF SVM (out-of-fold)",
+    "Logistic (80/20 holdout)",
+    "HGB (80/20 holdout)",
     "Random routing (expected)",
 )
 
@@ -63,16 +62,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--igw-mu", type=float, default=2.0)
     parser.add_argument("--igw-min-propensity", type=float, default=0.1)
     parser.add_argument("--random-repeats", type=int, default=100)
-    parser.add_argument("--skyline-folds", type=int, default=5)
-    parser.add_argument(
-        "--residual-permutations",
-        type=int,
-        default=100,
-        help=(
-            "Shuffled-training-label refits for the residual predictability "
-            "test; use 0 to skip the permutation test"
-        ),
-    )
+    parser.add_argument("--skyline-validation-fraction", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=0)
     return parser
 
@@ -97,32 +87,57 @@ def _prompt_context_rounds(
     cache: RoutingCache,
     prompt_components: int,
     limit: int | None,
+    seed: int = 0,
 ):
-    """Attach the manifest-defined prompt-PCA block to every eligible round."""
-    rounds = cache.eligible_rounds()
+    """Attach prompt contexts and one frozen synthetic outcome to every round."""
+    all_rounds = cache.eligible_rounds()
     all_contexts, block = cache.context_block(
         "prompt_embedding_pca", components=prompt_components
     )
-    contexts = all_contexts[cache.eligible_indices]
+    eligible_contexts = all_contexts[cache.eligible_indices]
+    teacher_probabilities, synthetic_outcomes, teacher_summary = (
+        generate_synthetic_prompt_outcomes(eligible_contexts, seed=seed)
+    )
     if limit is not None:
         if limit < 1:
             raise ValueError("--limit must be positive")
-        rounds = rounds[:limit]
-        contexts = contexts[:limit]
-    if not rounds:
+        all_rounds = all_rounds[:limit]
+        eligible_contexts = eligible_contexts[:limit]
+        teacher_probabilities = teacher_probabilities[:limit]
+        synthetic_outcomes = synthetic_outcomes[:limit]
+    if not all_rounds:
         raise ValueError("The cache has no eligible weak/strong answer pairs")
     prompt_rounds = [
-        replace(item, context=contexts[index].copy())
-        for index, item in enumerate(rounds)
+        replace(
+            item,
+            context=eligible_contexts[index].copy(),
+            outcome_override=int(synthetic_outcomes[index]),
+        )
+        for index, item in enumerate(all_rounds)
     ]
-    return prompt_rounds, {
+    context_summary = {
         "source": cache.manifest.get("prompt_embedding_definition"),
         "context_block": block,
-        "context_dimension": int(contexts.shape[1]),
+        "context_dimension": int(eligible_contexts.shape[1]),
         "pca_scope": cache.manifest.get("pca_scope"),
         "fit_scope": "precomputed across all collected prompts",
         "outcome_or_answer_features_used": False,
     }
+    teacher_summary["probabilities_stored_in_player_observations"] = False
+    teacher_summary["selected_examples"] = len(prompt_rounds)
+    teacher_summary["selected_probability_mean"] = float(
+        np.mean(teacher_probabilities)
+    )
+    synthetic_rows = [
+        {
+            "t": index + 1,
+            "id": item.example_id,
+            "teacher_probability": float(teacher_probabilities[index]),
+            "synthetic_outcome": int(synthetic_outcomes[index]),
+        }
+        for index, item in enumerate(prompt_rounds)
+    ]
+    return prompt_rounds, context_summary, teacher_summary, synthetic_rows
 
 
 def _run_one_player(method: str, player, config, rounds, progress_label: str):
@@ -138,11 +153,10 @@ def _run_one_player(method: str, player, config, rounds, progress_label: str):
         transition = environment.step(decision_wrapper.action)
         player.update(transition.action, observation.context, transition.outcome)
 
-        # Evaluation can inspect the cached strong reference, but action 0 still
-        # reveals no outcome to the player through EnvironmentTransition.
-        strong_answer = rounds[transition.t - 1].strong_answer
-        final_answer = strong_answer if transition.action == 1 else observation.weak_answer
-        correct += int(final_answer == strong_answer)
+        # Evaluation can inspect the synthetic outcome after acting, while the
+        # player still receives it only when action 1 was selected.
+        evaluation_outcome = rounds[transition.t - 1].routing_outcome
+        correct += int(transition.action == 1 or evaluation_outcome == 0)
         routed += transition.action
         trajectories.append(
             {
@@ -156,6 +170,7 @@ def _run_one_player(method: str, player, config, rounds, progress_label: str):
                 "weak_answer": observation.weak_answer,
                 "action": transition.action,
                 "feedback_revealed_to_player": transition.outcome,
+                "evaluation_only_synthetic_outcome": evaluation_outcome,
                 "predicted_disagreement": getattr(
                     decision, "predicted_disagreement", None
                 ),
@@ -191,7 +206,7 @@ def _run_one_player(method: str, player, config, rounds, progress_label: str):
             ),
             "routing_rate": routed / len(rounds),
             "accuracy": correct / len(rounds),
-            "metric": "agreement_with_strong_llm",
+            "metric": "synthetic_routing_accuracy",
             "examples": len(rounds),
             "min_tastes": getattr(player, "min_tastes", config.min_tastes),
             "bootstrap_per_class": getattr(player, "bootstrap_per_class", None),
@@ -215,7 +230,7 @@ def _random_matched(
 ):
     rng = np.random.default_rng(seed)
     outcomes = np.asarray(
-        [item.weak_answer != item.strong_answer for item in rounds], dtype=bool
+        [item.routing_outcome for item in rounds], dtype=bool
     )
     rates, accuracies = [], []
     for _ in range(repeats):
@@ -230,14 +245,14 @@ def _random_matched(
         "routing_rate": float(np.mean(rates)),
         "accuracy": float(np.mean(accuracies)),
         "accuracy_std": float(np.std(accuracies)),
-        "metric": "agreement_with_strong_llm",
+        "metric": "synthetic_routing_accuracy",
         "examples": len(rounds),
         "random_repeats": repeats,
     }
 
 
 def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
-    """Run RBF-SVM ETC/IGW, logistic CBPSide, and matched random."""
+    """Run HGB ETC/IGW, linear-logistic CBPSide, and matched random."""
     context_dim = int(rounds[0].context.size)
     rows, trajectories = [], []
     for loss_index, l01 in enumerate(args.l01_values):
@@ -260,7 +275,7 @@ def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
         players = [
             (
                 "ETC",
-                RBFSVMETCPlayer(
+                HGBETCPlayer(
                     context_dim, base, seed=args.seed + loss_index
                 ),
                 base,
@@ -307,44 +322,25 @@ def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
 
 def run_skyline(
     rounds,
-    requested_folds: int,
+    validation_fraction: float,
     seed: int,
-    residual_permutations: int,
 ):
     contexts = np.stack([item.context for item in rounds])
     outcomes = np.asarray(
-        [item.weak_answer != item.strong_answer for item in rounds], dtype=np.int64
+        [item.routing_outcome for item in rounds], dtype=np.int64
     )
-    rows, summary, residual_probability_sets = fit_supervised_skylines(
-        contexts, outcomes, seed=seed, requested_folds=requested_folds
-    )
-    rows.extend(random_routing_reference(float(np.mean(outcomes == 0))))
-    residual_rows, residual_bin_rows = binary_residual_diagnostics(
-        residual_probability_sets, outcomes
-    )
-    (
-        residual_predictability_rows,
-        residual_predictability_bin_rows,
-        residual_permutation_rows,
-        residual_predictability_summary,
-    ) = cross_fitted_residual_predictability(
+    rows, summary, prediction_rows = fit_holdout_prompt_skylines(
         contexts,
         outcomes,
+        validation_fraction=validation_fraction,
         seed=seed,
-        requested_folds=requested_folds,
-        permutation_repeats=residual_permutations,
     )
-    summary["residual_predictability"] = residual_predictability_summary
-    return (
-        rows,
-        summary,
-        residual_rows,
-        residual_bin_rows,
-        residual_predictability_rows,
-        residual_predictability_bin_rows,
-        residual_permutation_rows,
-        residual_predictability_summary,
+    rows.extend(
+        random_routing_reference(summary["validation_agreement_rate"])
     )
+    for row in prediction_rows:
+        row["id"] = rounds[row["example_index"]].example_id
+    return rows, summary, prediction_rows
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
@@ -383,7 +379,7 @@ def _plot(output: Path, online_rows: list[dict], skyline_rows: list[dict]) -> No
                 marker="o",
                 label=method,
             )
-        axes[0].set_title("Online players")
+        axes[0].set_title("Online routing on synthetic outcomes")
         axes[0].legend(fontsize=8)
     else:
         axes[0].text(0.5, 0.5, "Online experiment not requested", ha="center")
@@ -400,15 +396,15 @@ def _plot(output: Path, online_rows: list[dict], skyline_rows: list[dict]) -> No
                 linewidth=2.5 if any(row.get("selected") for row in selected) else 1.2,
                 label=model,
             )
-        axes[1].set_title("Prompt context: linear vs nonlinear skyline")
+        axes[1].set_title("Supervised 80/20 synthetic skyline")
         axes[1].legend(fontsize=7)
     else:
         axes[1].text(0.5, 0.5, "Skyline experiment not requested", ha="center")
     for axis in axes:
         axis.set_xlim(0, 1)
         axis.set_ylim(0, 1)
-        axis.set_xlabel("Strong-model routing rate")
-        axis.set_ylabel("Agreement with strong-model reference")
+        axis.set_xlabel("Action-1 routing rate")
+        axis.set_ylabel("Synthetic routing accuracy")
         axis.grid(alpha=0.25)
     figure.savefig(output, dpi=180)
     plt.close(figure)
@@ -427,14 +423,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if any(value < args.l11 for value in args.l01_values):
         raise SystemExit("Every l01 must be greater than or equal to l11")
-    if (
-        args.random_repeats < 1
-        or args.skyline_folds < 2
-        or args.residual_permutations < 0
-    ):
+    if args.random_repeats < 1:
+        raise SystemExit("Random repeats must be positive")
+    if not 0.0 < args.skyline_validation_fraction < 1.0:
         raise SystemExit(
-            "Random repeats must be positive, skyline folds >= 2, and residual "
-            "permutations nonnegative"
+            "Skyline validation fraction must be strictly between zero and one"
         )
     if min(
         args.etc_tastes,
@@ -448,13 +441,17 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise SystemExit("Taste and bootstrap settings must be nonnegative")
 
     cache = load_cache(args.cache)
-    rounds, context_summary = _prompt_context_rounds(
-        cache,
-        args.prompt_components,
-        args.limit,
+    rounds, context_summary, teacher_summary, synthetic_rows = (
+        _prompt_context_rounds(
+            cache,
+            args.prompt_components,
+            args.limit,
+            args.seed,
+        )
     )
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    _write_csv(output / "synthetic_outcomes.csv", synthetic_rows)
     print(
         f"Loaded {len(rounds)} eligible rows; context dimension "
         f"{rounds[0].context.size}.",
@@ -465,12 +462,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     trajectories: list[dict] = []
     skyline_rows: list[dict] = []
     skyline_summary: dict = {}
-    residual_rows: list[dict] = []
-    residual_bin_rows: list[dict] = []
-    residual_predictability_rows: list[dict] = []
-    residual_predictability_bin_rows: list[dict] = []
-    residual_permutation_rows: list[dict] = []
-    residual_predictability_summary: dict = {}
+    skyline_prediction_rows: list[dict] = []
     if args.experiment in {"all", "online"}:
         online_rows, trajectories = run_online(rounds, args)
         _write_csv(output / "online_results.csv", online_rows)
@@ -483,20 +475,10 @@ def main(argv: Iterable[str] | None = None) -> int:
             for row in trajectories:
                 handle.write(json.dumps(_jsonable(row)) + "\n")
     if args.experiment in {"all", "skyline"}:
-        (
-            skyline_rows,
-            skyline_summary,
-            residual_rows,
-            residual_bin_rows,
-            residual_predictability_rows,
-            residual_predictability_bin_rows,
-            residual_permutation_rows,
-            residual_predictability_summary,
-        ) = run_skyline(
+        skyline_rows, skyline_summary, skyline_prediction_rows = run_skyline(
             rounds,
-            args.skyline_folds,
+            args.skyline_validation_fraction,
             args.seed,
-            args.residual_permutations,
         )
         _write_csv(output / "supervised_skyline.csv", skyline_rows)
         (output / "supervised_skyline.json").write_text(
@@ -507,35 +489,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         (output / "supervised_model_comparison.json").write_text(
             json.dumps(_jsonable(comparison), indent=2), encoding="utf-8"
         )
-        _write_csv(output / "supervised_residuals.csv", residual_rows)
-        _write_csv(output / "supervised_residual_bins.csv", residual_bin_rows)
-        plot_binary_residuals(
-            output / "supervised_residual_plots.png",
-            residual_rows,
-            residual_bin_rows,
-        )
         _write_csv(
-            output / "residual_predictability.csv",
-            residual_predictability_rows,
-        )
-        _write_csv(
-            output / "residual_predictability_bins.csv",
-            residual_predictability_bin_rows,
-        )
-        _write_csv(
-            output / "residual_permutation_reference.csv",
-            residual_permutation_rows,
-        )
-        (output / "residual_predictability_summary.json").write_text(
-            json.dumps(_jsonable(residual_predictability_summary), indent=2),
-            encoding="utf-8",
-        )
-        plot_residual_predictability(
-            output / "residual_predictability.png",
-            residual_predictability_rows,
-            residual_predictability_bin_rows,
-            residual_permutation_rows,
-            residual_predictability_summary,
+            output / "supervised_holdout_predictions.csv",
+            skyline_prediction_rows,
         )
 
     summary = {
@@ -544,7 +500,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         "examples": len(rounds),
         "context_dimension": int(rounds[0].context.size),
         "context": context_summary,
-        "routing_reference": "strong_model_answer",
+        "routing_reference": "synthetic_prompt_forest_outcome",
+        "purpose": "positive-control sanity check for routing implementations",
+        "synthetic_teacher": teacher_summary,
         "experiment": args.experiment,
         "parameters": vars(args) | {"cache": str(args.cache), "output_dir": str(args.output_dir)},
         "skyline": skyline_summary,
