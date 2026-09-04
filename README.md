@@ -1,191 +1,232 @@
-# Offline LLM-routing algorithm simulation
+# Offline LLM-routing simulation
 
-This project reads the one-time cache produced by `Data_collection_LLM_routing`.
-It does not load an LLM, contact Hugging Face, need an `HF_TOKEN`, or require a
-GPU. On `experiment/prompt-routing`, the active study uses the first 20
-components of the cached prompt-PCA block to predict true cached weak/strong
-disagreement. A committed synthetic-label positive control remains available
-through `--outcome-source synthetic`.
+This repository replays weak-versus-strong LLM routing policies from a collected
+ARC-Easy cache. It is CPU-only: the simulation does not load an LLM, contact
+Hugging Face, require an `HF_TOKEN`, or need a GPU.
 
-## Set up on the laptop
+The active work on `experiment/prompt-routing` asks whether prompt-embedding
+features support a useful nonlinear routing policy. The real routing target is
+cached weak/strong disagreement. A separate synthetic-label positive control is
+available for implementation sanity checks; it must not be interpreted as real
+ARC routing performance.
 
-Open PowerShell in this folder and run:
+For experiment history and conclusions, read [EXPERIMENTS.md](EXPERIMENTS.md).
+For module boundaries and data flow, read [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Routing definitions
+
+- `Y=1`: the extracted weak- and strong-model answers disagree.
+- `Y=0`: their extracted answers agree.
+- Action `0`: retain the weak answer; the player receives no outcome feedback.
+- Action `1`: route to the strong model; the disagreement outcome is revealed.
+- A **taste** is an action-1 round whose outcome becomes available for learning.
+- Routing accuracy is agreement with the cached strong-model answer. ARC gold
+  answers are not routing labels, online feedback, or the reported accuracy
+  reference.
+
+For `l11=1`, the empirical asymmetric decision loss reported in analysis is
+
+```text
+decision loss = routing_rate + l01 * (1 - routing_accuracy)
+```
+
+Raw routing accuracy should not be used alone to compare policies with different
+routing rates.
+
+## Data
+
+`llm-routing-cache-full.zip` is versioned in the repository and is available on
+the active branches. It uses schema v2 and contains 5,173 collected rows, of
+which 5,138 are eligible. Rows are ineligible when either model answer could not
+be parsed.
+
+The cache stores a 142-dimensional context:
+
+| Block | Dimensions | Description |
+|---|---:|---|
+| Uncertainty | 14 | Weak-model choice and token-probability summaries |
+| Hidden-state PCA | 64 | Whitened PCA of weak-model hidden states |
+| Prompt-embedding PCA | 64 | Whitened PCA of context-free prompt embeddings |
+
+The prompt-routing code finds `prompt_embedding_pca` through
+`manifest.json -> context_blocks`; it never hardcodes column numbers. The PCA
+is fixed, transductive, and outcome-free.
+
+## Setup
+
+Clone the repository and select the prompt-routing branch:
+
+```powershell
+git clone https://github.com/Kapilan-Balagopalan/LLM_Routing.git
+Set-Location LLM_Routing
+git switch experiment/prompt-routing
+```
+
+Create the environment and install the project:
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -e ".[test]"
+python -m pytest -q
 ```
 
-Copy `llm-routing-cache-full.zip` into this folder. It already contains the
-64-dimensional prompt-PCA block, so no separate embedding sidecar is needed for
-the routing experiment. Run every current experiment with:
+## Active 32-component experiment
+
+The next planned experiment uses the first 32 components of the manifest-defined
+prompt block. It retains the ten loss points, gamma 64, and the 3-, 7-, and
+15-leaf HGB capacity comparison from the completed 20-component study.
 
 ```powershell
 simulate-llm-routing `
-  --cache llm-routing-cache-full.zip `
+  --cache .\llm-routing-cache-full.zip `
   --outcome-source cached `
-  --experiment all
+  --experiment all `
+  --prompt-components 32 `
+  --igw-gamma-values 64 `
+  --hgb-max-leaf-nodes 3 7 15 `
+  --output-dir .\prompt-routing-32-hgb-capacity-results
 ```
 
-For a quick check, use a prefix:
+Specifying `--prompt-components 32` is important: the command-line default
+remains 20 so the completed 20-component experiment can still be reproduced.
+
+For a quick installation check, run only the supervised path on a prefix:
 
 ```powershell
 simulate-llm-routing `
-  --cache llm-routing-cache-full.zip `
+  --cache .\llm-routing-cache-full.zip `
+  --outcome-source cached `
   --experiment skyline `
-  --limit 100
+  --prompt-components 32 `
+  --hgb-max-leaf-nodes 3 7 15 `
+  --limit 500 `
+  --output-dir .\smoke-test-results
 ```
 
-The useful choices are:
+The smoke test checks execution only; its small-sample metrics are not research
+results.
 
-- `--experiment skyline`: a separate supervised 80/20 train-validation
-  comparison of only linear logistic and the same HGB profile used online.
-- `--experiment online`: HGB ETC, linear-logistic CBPSide, five HGB IGW gamma
-  settings, and random routing matched to ETC traffic. With no `--limit`, all
-  5,138 eligible samples are online rounds; there is no supervised training
-  subset.
-- `--experiment all`: run both separate evaluations against the cached
-  weak/strong disagreement labels (the default outcome source).
+## Active algorithm settings
 
-Results go to `simulation-results/`, including CSV/JSON tables, the full online
-trajectory, `routing_comparison.png`, and a portable `simulation-results.zip`.
-Each execution refits all estimators from the cached samples; no LLM generation
-is repeated. You can run new seeds, loss values, thresholds and algorithms many
-times against the same cache.
+| Policy | Probability model | Exploration and fitting |
+|---|---|---|
+| ETC | HGB with 3, 7, or 15 maximum leaves | Route the first 300 rounds, fit once, then freeze |
+| IGW | Online-refitted HGB with the same capacities | `gamma=64`, `mu=2`, no forced tastes or class bootstrap |
+| CBPSide | Regularized linear logistic regression | No forced tastes or class bootstrap; confidence-based routing |
+| Random | No model | Matched separately to each ETC profile's realized traffic |
 
-`routing_comparison.png` keeps the two tasks in separate panels. The supervised
-panel plots only logistic and HGB. Exact validation probabilities are saved in
-`supervised_holdout_predictions.csv`; all skyline points and model metrics
-remain in CSV and JSON. Synthetic mode additionally writes
-`synthetic_outcomes.csv`.
+Every HGB profile uses 50 boosting iterations, learning rate 0.05, minimum leaf
+size 20, L2 regularization 1.0, and no early stopping. Only
+`max_leaf_nodes = 3, 7, 15` changes. IGW inverse-propensity weights are capped
+at 10. A common base seed is used across loss thresholds and HGB capacities.
 
-## Current defaults
+The loss grid contains ten evenly spaced decision thresholds:
 
-- Context: the first 20 components of `prompt_embedding_pca`, selected from the
-  v2 manifest block in PCA order. Weak-model uncertainty and hidden-state PCA
-  blocks are not used.
-- Outcome: true cached weak/strong disagreement. The cached strong-model answer
-  is the routing reference; ARC gold answers are never routing labels.
-- Loss grid: ten values obtained from evenly spaced decision thresholds
-  `alpha = 0.55, ..., 0.30` using `l01 = 1 / alpha` because `l11 = 1`.
-- HGB capacity study: three profiles with `max_leaf_nodes = 3, 7, 15`.
-  Every profile keeps 50 boosting iterations, learning rate 0.05, minimum leaf
-  size 20, and L2 regularization 1.0.
-- ETC: 300 initial tastes, then one frozen HGB estimator for each capacity.
-- CBPSide: regularized linear logistic regression with no forced tastes and no
-  class bootstrap.
-- IGW: one `gamma = 64` policy for each online-refitted HGB capacity, with
-  `mu = 2`, no forced tastes or class bootstrap, and inverse-propensity weights
-  capped at 10.
-- Online accuracy: agreement with the cached strong-model reference, not ARC
-  gold-answer accuracy.
-- Supervised skyline: one stratified 4:1 split, with logistic and all three HGB
-  capacities fit only on the training 80% and evaluated only on the validation
-  20%.
-- Reproducibility: a common seed is used across all loss thresholds and HGB
-  capacities. Thus a curve is not confounded by changing its random trajectory
-  at every threshold.
+```text
+alpha = 0.5500, 0.5222, 0.4944, 0.4667, 0.4389,
+        0.4111, 0.3833, 0.3556, 0.3278, 0.3000
+```
 
-Pass alternatives on the command line, for example:
+Because `l11=1`, the simulator uses `l01=1/alpha`.
+
+### CBPSide confidence scaling
+
+The current CBPSide implementation L2-normalizes each context using
+`x / max(1, ||x||_2)`, prepends an intercept, and forms
+`V = I + sum(x x^T)`. Its effective confidence radius is
+
+```text
+radius = min(0.25 * sqrt(x^T V^-1 x), 0.5)
+```
+
+The code calculates a theoretical beta expression, but that multiplier is
+currently disabled. Consequently, `delta` and the theoretical logistic-curvature
+factor do not affect routing. Results should therefore be described as using a
+heuristically scaled Mahalanobis confidence radius, not the complete theoretical
+CBPSide confidence bound.
+
+## Supervised skyline versus online routing
+
+These are separate evaluations:
+
+- `--experiment skyline` makes one stratified 80/20 train-validation split. It
+  fits logistic and the three HGB capacities on the training 80% and evaluates
+  only validation predictions.
+- `--experiment online` sends all 5,138 eligible samples sequentially to ETC,
+  IGW, and CBPSide. There is no supervised pretraining subset, and action 0
+  hides its outcome from the player.
+- `--experiment all` runs both evaluations against the same selected outcome
+  source.
+
+Before an online estimator has enough revealed observations from both classes,
+it returns a Laplace-smoothed constant probability. It does not inspect hidden
+or future outcomes.
+
+## Outputs
+
+The requested output directory contains:
+
+| File | Contents |
+|---|---|
+| `summary.json` | Cache identity, feature block, parameters, loss grid, and skyline summary |
+| `online_results.csv/json` | Per-policy routing rate and accuracy at every loss point |
+| `online_trajectories.jsonl` | Round-level actions, revealed feedback, predictions, and diagnostics |
+| `supervised_model_comparison.csv/json` | Holdout AUC, log loss, Brier score, ECE, and model settings |
+| `supervised_skyline.csv/json` | Threshold-level supervised routing curves |
+| `supervised_holdout_predictions.csv` | Validation outcomes and model probabilities |
+| `routing_comparison.png` | Separate online-routing and supervised-skyline panels |
+| `simulation-results.zip` | Portable bundle of the generated outputs |
+
+Result directories and result ZIPs are ignored by Git. The source cache is the
+one explicit ZIP exception.
+
+## Synthetic positive control
+
+To reproduce the earlier artificial forest-label sanity check:
 
 ```powershell
 simulate-llm-routing `
-  --cache llm-routing-cache-full.zip `
-  --l01-values 1 2 4 8 `
-  --seed 7
-```
-
-The prompt dimension defaults to the first 20 of 64 available components. The simulator
-locates `prompt_embedding_pca` through `manifest.json -> context_blocks`; it
-does not hardcode column numbers. `--prompt-components` can select a smaller
-prefix for a later ablation.
-
-To reproduce the earlier synthetic positive control, use:
-
-```powershell
-simulate-llm-routing `
-  --cache llm-routing-cache-full.zip `
+  --cache .\llm-routing-cache-full.zip `
   --outcome-source synthetic `
+  --experiment all `
   --prompt-components 64 `
   --igw-gamma-values 16 `
   --hgb-max-leaf-nodes 15 `
   --l01-values 1.82 2.22 2.67 3.33 `
-  --output-dir prompt-forest-sanity-results
+  --output-dir .\prompt-forest-sanity-results
 ```
 
-Its teacher uses 50 depth-four random-forest trees and prompt PCs 1--12. It uses
-no real disagreement label, model answer, or ARC gold answer.
+The generated labels replace real disagreement for this run. They use no ARC
+gold answer, cached model answer, or real disagreement label. See
+[EXPERIMENTS.md](EXPERIMENTS.md) before interpreting this control.
 
-## Earlier external prompt-embedding diagnostic
+## Branch guide
 
-This earlier diagnostic uses a separate MiniLM sidecar to compare prompt
-features with the old weak-model context. It is retained for reproducibility;
-the current prompt-routing command instead reads the 64D prompt block already
-stored in the v2 full cache.
+| Branch | Purpose |
+|---|---|
+| `main` | Current shared repository state |
+| `experiment/prompt-routing` | Prompt-only real-label routing and synthetic positive control |
+| `experiment/prompt-embedding` | External semantic prompt augmentation and residual correction |
+| `experiment/residual-diagnostics` | Logistic/HGB/MLP residual and specification diagnostics |
+| `backup/current-combined` | Recovery snapshot of the earlier combined workflow |
 
-Install the optional local encoder dependency:
+Run an experiment only from its corresponding branch. Historical commands,
+metrics, and decisions are recorded in [EXPERIMENTS.md](EXPERIMENTS.md), while
+implementation responsibilities are summarized in
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
-```powershell
-python -m pip install -e ".[embedding,test]"
-```
+## Source layout
 
-Encode each question and its labeled choices using the default public frozen
-encoder, `sentence-transformers/all-MiniLM-L6-v2`:
+- `src/llm_routing_simulation/cache.py`: cache validation and manifest-defined
+  feature selection.
+- `src/llm_routing_simulation/environment.py`: partial-feedback environment.
+- `src/llm_routing_simulation/player.py`: act-then-update player interface.
+- `src/llm_routing_simulation/algorithm.py`: ETC, IGW, and CBPSide policies.
+- `src/llm_routing_simulation/skyline.py`: supervised models and skylines.
+- `src/llm_routing_simulation/run.py`: command-line orchestration and outputs.
+- `src/llm_routing_simulation/synthetic_prompt.py`: synthetic-label positive
+  control.
 
-```powershell
-collect-prompt-embeddings `
-  --cache llm-routing-cache.zip `
-  --output prompt-embeddings.zip `
-  --device cpu
-```
-
-The first invocation may download the encoder weights from Hugging Face. The
-embedding cache contains no outcomes, answer labels, or model responses and can
-be reused for every later simulation. The semantic text is exactly the question
-plus labeled choices; repeated generation instructions are excluded.
-
-Run the controlled CPU comparison:
-
-```powershell
-simulate-prompt-embedding-context `
-  --cache llm-routing-cache.zip `
-  --prompt-embeddings prompt-embeddings.zip `
-  --prompt-components 32 `
-  --residual-permutations 100 `
-  --robustness-seeds 5
-```
-
-It uses identical folds to compare the current 78-dimensional context, the
-32-dimensional prompt PCA context, and a compact 46-dimensional context made
-from 14 uncertainty features plus the 32 prompt features. The 64-dimensional
-weak-model hidden-state PCA is deliberately excluded from the compact hybrid.
-It also directly tests whether prompt features predict held-out residuals from
-the current logistic model. Prompt PCA is fixed, transductive, and outcome-free.
-The nested cross-fitted two-stage diagnostic adds the predicted prompt residual
-to the current-context logistic probability, clips the result to a valid
-probability, and compares it with the base probability on AUC, log loss, Brier
-score, 50% routing accuracy, and the full routing skyline. By default it repeats
-the cross-fitting with five consecutive split seeds; only the primary seed runs
-the permutation test. These repeated seeds measure split stability on the same
-data, not performance on independent datasets. This remains a supervised
-diagnostic and is not used by the online routing players.
-Results are written to `prompt-embedding-results/` and bundled as
-`prompt-embedding-results.zip`. The prompt-component count remains configurable.
-The initial primary run used 16 components; 32 is a documented sensitivity run
-motivated by the initial PCA retaining only 37.05% of embedding variance.
-
-## Where to edit
-
-- `src/llm_routing_simulation/algorithm.py`: ETC, CBPSide and IGW players.
-- `src/llm_routing_simulation/skyline.py`: supervised logistic/HGB skylines.
-- `src/llm_routing_simulation/environment.py`: partial-feedback rules.
-- `src/llm_routing_simulation/run.py`: experiment parameters, result tables and
-  plots.
-- `src/llm_routing_simulation/cache.py`: cache validation and context selection.
-- `src/llm_routing_simulation/prompt_embeddings.py`: outcome-free prompt text,
-  frozen encoding, and portable sidecar validation.
-- `src/llm_routing_simulation/prompt_experiment.py`: three-context supervised
-  comparison, incremental prompt-residual test, and two-stage stability check.
-
-Run tests with `python -m pytest`.
+When changing code, preserve the feedback boundary, add an offline test, update
+[EXPERIMENTS.md](EXPERIMENTS.md), and keep generated results untracked.
