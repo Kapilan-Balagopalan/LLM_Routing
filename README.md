@@ -2,11 +2,10 @@
 
 This project reads the one-time cache produced by `Data_collection_LLM_routing`.
 It does not load an LLM, contact Hugging Face, need an `HF_TOKEN`, or require a
-GPU. On `experiment/prompt-routing`, the cached 64D prompt block drives a
-synthetic-label positive control: a fixed multifeature forest defines fake
-disagreement outcomes so the supervised and partial-feedback routing
-implementations can be sanity-checked independently of real-data signal
-strength.
+GPU. On `experiment/prompt-routing`, the active study uses the first 20
+components of the cached prompt-PCA block to predict true cached weak/strong
+disagreement. A committed synthetic-label positive control remains available
+through `--outcome-source synthetic`.
 
 ## Set up on the laptop
 
@@ -25,6 +24,7 @@ the routing experiment. Run every current experiment with:
 ```powershell
 simulate-llm-routing `
   --cache llm-routing-cache-full.zip `
+  --outcome-source cached `
   --experiment all
 ```
 
@@ -40,13 +40,13 @@ simulate-llm-routing `
 The useful choices are:
 
 - `--experiment skyline`: a separate supervised 80/20 train-validation
-  comparison of linear logistic, the same HGB profile used online, and the
-  analytic expected-random reference.
-- `--experiment online`: HGB ETC, linear-logistic CBPSide, HGB IGW, and random
-  routing matched to ETC traffic. With no `--limit`, all 5,138 eligible samples
-  are online rounds; there is no supervised training subset.
-- `--experiment all`: run both separate evaluations against the same frozen
-  synthetic outcome vector (the default).
+  comparison of only linear logistic and the same HGB profile used online.
+- `--experiment online`: HGB ETC, linear-logistic CBPSide, five HGB IGW gamma
+  settings, and random routing matched to ETC traffic. With no `--limit`, all
+  5,138 eligible samples are online rounds; there is no supervised training
+  subset.
+- `--experiment all`: run both separate evaluations against the cached
+  weak/strong disagreement labels (the default outcome source).
 
 Results go to `simulation-results/`, including CSV/JSON tables, the full online
 trajectory, `routing_comparison.png`, and a portable `simulation-results.zip`.
@@ -55,27 +55,28 @@ is repeated. You can run new seeds, loss values, thresholds and algorithms many
 times against the same cache.
 
 `routing_comparison.png` keeps the two tasks in separate panels. The supervised
-panel plots only logistic, HGB, and expected random. Exact validation
-probabilities are saved in `supervised_holdout_predictions.csv`; all skyline
-points and model metrics remain in CSV and JSON. `synthetic_outcomes.csv`
-records the common teacher probability and sampled fake label for every round.
+panel plots only logistic and HGB. Exact validation probabilities are saved in
+`supervised_holdout_predictions.csv`; all skyline points and model metrics
+remain in CSV and JSON. Synthetic mode additionally writes
+`synthetic_outcomes.csv`.
 
 ## Current defaults
 
-- Context: the complete fixed 64-dimensional `prompt_embedding_pca` block from
-  the v2 cache manifest. Weak-model uncertainty and hidden-state PCA blocks are
-  not used.
-- Loss values: `l01 = 1.82, 2.22, 2.67, 3.33`, `l11 = 1`.
-- Synthetic teacher: 50 depth-four random-forest trees using prompt PCs 1--12;
-  fixed seed 9000 and Bernoulli label seed 10000 by default. It uses no real
-  disagreement labels, answers, or ARC gold labels.
+- Context: the first 20 components of `prompt_embedding_pca`, selected from the
+  v2 manifest block in PCA order. Weak-model uncertainty and hidden-state PCA
+  blocks are not used.
+- Outcome: true cached weak/strong disagreement. The cached strong-model answer
+  is the routing reference; ARC gold answers are never routing labels.
+- Loss grid: ten values obtained from evenly spaced decision thresholds
+  `alpha = 0.55, ..., 0.30` using `l01 = 1 / alpha` because `l11 = 1`.
 - ETC: 300 initial tastes, then one frozen HGB estimator.
 - CBPSide: regularized linear logistic regression with no forced tastes and no
   class bootstrap.
-- IGW: online-refitted HGB, `mu = 2`, fixed `gamma = 16`, no
-  forced tastes or class bootstrap, and inverse-propensity weights capped at 10.
-- Online accuracy: route every synthetic disagreement correctly and retain the
-  weak action for every synthetic agreement. It is not real LLM answer accuracy.
+- IGW: five online-refitted HGB policies with
+  `gamma = 8, 16, 32, 64, 128`, `mu = 2`, no forced tastes or class bootstrap,
+  and inverse-propensity weights capped at 10.
+- Online accuracy: agreement with the cached strong-model reference, not ARC
+  gold-answer accuracy.
 - Supervised skyline: one stratified 4:1 split, with HGB and logistic fit only on
   the training 80% and evaluated only on the validation 20%.
 
@@ -88,10 +89,25 @@ simulate-llm-routing `
   --seed 7
 ```
 
-The prompt dimension defaults to all 64 available components. The simulator
+The prompt dimension defaults to the first 20 of 64 available components. The simulator
 locates `prompt_embedding_pca` through `manifest.json -> context_blocks`; it
 does not hardcode column numbers. `--prompt-components` can select a smaller
 prefix for a later ablation.
+
+To reproduce the earlier synthetic positive control, use:
+
+```powershell
+simulate-llm-routing `
+  --cache llm-routing-cache-full.zip `
+  --outcome-source synthetic `
+  --prompt-components 64 `
+  --igw-gamma-values 16 `
+  --l01-values 1.82 2.22 2.67 3.33 `
+  --output-dir prompt-forest-sanity-results
+```
+
+Its teacher uses 50 depth-four random-forest trees and prompt PCs 1--12. It uses
+no real disagreement label, model answer, or ARC gold answer.
 
 ## Earlier external prompt-embedding diagnostic
 

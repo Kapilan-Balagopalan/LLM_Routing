@@ -15,8 +15,8 @@
 - `experiment/residual-diagnostics`: real-data Logistic/HGB/MLP residual work.
 - `experiment/prompt-embedding`: outcome-free semantic prompt augmentation and
   its controlled supervised/residual comparison.
-- `experiment/prompt-routing`: prompt-only synthetic-label positive control for
-  supervised skyline and partial-feedback online routing implementations.
+- `experiment/prompt-routing`: prompt-only real-label routing study, retaining
+  an optional synthetic-label positive control.
 - `backup/current-combined`: recovery snapshot made before branch separation.
 
 Do not mix an experiment into another branch. Shared bug fixes should be made
@@ -37,8 +37,8 @@ on `main` and then deliberately merged or cherry-picked.
   states, never disagreement labels.
 - Exclude rows whose weak or strong answer extraction failed.
 
-Scoped exception: `experiment/prompt-routing` currently defines an explicit
-synthetic outcome override as a positive-control environment. On that branch,
+Scoped exception: `experiment/prompt-routing` can define an explicit synthetic
+outcome override with `--outcome-source synthetic`. In that mode,
 the fake label replaces cached disagreement for both evaluation and revealed
 action-1 feedback. It must be identified as synthetic in every result; the
 teacher probabilities and unrevealed labels must remain hidden from players.

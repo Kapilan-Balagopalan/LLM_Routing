@@ -15,11 +15,11 @@ weak- or strong-model generation is repeated.
 llm-routing-cache-full.zip
     -> cache.py validates records and arrays
     -> run.py finds prompt_embedding_pca from manifest context_blocks
-    -> synthetic_prompt.py defines one frozen prompt-based positive-control outcome
+    -> run.py selects cached disagreement or the optional synthetic positive control
     -> environment.py emits the current context and weak answer
     -> player.py defines the act-then-update protocol
     -> algorithm.py chooses action 0 or 1 from revealed history
-    -> environment.py reveals the synthetic outcome only when action 1 was selected
+    -> environment.py reveals the active outcome only when action 1 was selected
     -> run.py records trajectories, metrics, tables, and plots
 ```
 
@@ -31,10 +31,10 @@ At round `t`, a player receives only the current context. It selects:
 The environment owns the complete cached stream. Players store only the action,
 context, and feedback that the environment actually revealed.
 
-On `experiment/prompt-routing`, the outcome in this protocol is a deliberately
-synthetic positive-control label rather than cached weak/strong disagreement.
-It tests whether the supervised and online algorithms recover a known nonlinear
-prompt-feature signal. It does not measure real LLM routing performance.
+On `experiment/prompt-routing`, cached weak/strong disagreement is the default
+outcome. A deliberately synthetic positive-control outcome remains selectable
+to test whether the same supervised and online code recovers known nonlinear
+prompt-feature signal.
 
 ## Cache and context
 
@@ -56,8 +56,9 @@ top probability, top-two margin, one-minus-top probability, next-token
 vocabulary entropy, four option probabilities, and four option log likelihoods.
 
 On `experiment/prompt-routing`, `run.py` obtains the block boundaries by finding
-`prompt_embedding_pca` in `manifest.context_blocks`. It exposes all 64 prompt
-components to the players and excludes the uncertainty and hidden-state blocks.
+`prompt_embedding_pca` in `manifest.context_blocks`. The active real-label study
+exposes the first 20 components in PCA order and excludes uncertainty and
+hidden-state blocks.
 The PCA was constructed during collection across all prompts without outcomes.
 An optional experiment limit is applied only after block selection.
 
@@ -91,8 +92,8 @@ It checks that updates correspond to the pending action and context.
 - `LogCBPSideATPlayer`: estimates a regularized linear logistic disagreement
   model and applies the CBPSide confidence rule without forced tastes.
 - `IGWPlayer`: estimates disagreement using an online-refitted histogram
-  gradient boosting classifier and samples an arm using inverse-gap weighting
-  with `mu=2`, `gamma=16`.
+  gradient boosting classifier and samples an arm using inverse-gap weighting.
+  The active sweep uses `mu=2` and `gamma` values 8, 16, 32, 64, and 128.
 - `RevealedFeedbackEstimator`: extracts only action-1 observations and applies
   capped inverse-propensity weights when supplied.
 
@@ -116,21 +117,20 @@ and unrevealed synthetic labels are never given to an online player.
 
 ### `skyline.py`
 
-For the active positive control, performs one stratified 80/20 split and fits
+For the active prompt study, performs one stratified 80/20 split and fits only
 linear logistic and the exact HGB profile used by the online nonlinear players
-on the training portion only. Classification metrics and threshold skylines
-are evaluated only on validation predictions; the figure adds an analytic
-expected-random reference. The module also retains broader cross-validated
+on the training portion. Classification metrics and threshold skylines are
+evaluated only on validation predictions. The module also retains broader cross-validated
 model-comparison functions used by earlier branches.
 
 ### `run.py`
 
 The `simulate-llm-routing` entry point runs online experiments, supervised
 skylines, or both. It writes reproducibility metadata, per-method summaries,
-the frozen synthetic outcome vector, validation predictions, full online
+optional synthetic outcome metadata, validation predictions, full online
 trajectories, plots, and a ZIP bundle. With no `--limit`, every one of the 5,138
 eligible cache rows is an online round. The supervised skyline remains a
-separate 4:1 train-validation task over the same frozen outcome vector.
+separate 4:1 train-validation task over the same selected outcome source.
 
 ### `prompt_embeddings.py`
 
@@ -162,9 +162,9 @@ or environment interfaces.
 - `experiment/prompt-embedding` adds a frozen semantic sidecar, a three-context
   supervised comparison, an incremental prompt-residual test, and a two-stage
   corrected-probability skyline with split-seed stability results.
-- `experiment/prompt-routing` uses the fixed prompt-only 64D context and a
-  multifeature forest-generated synthetic outcome as a positive control for a
-  separate supervised skyline and full-stream online routing evaluation.
+- `experiment/prompt-routing` uses 20 prompt PCs and cached disagreement for a
+  separate supervised skyline and full-stream online routing evaluation. It
+  retains the multifeature forest-generated synthetic positive control.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather
 than inferring research intent from implementation details alone.

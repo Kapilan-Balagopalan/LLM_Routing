@@ -12,7 +12,7 @@ decision.
 | `experiment/synthetic-sanity` | Controlled nonlinear `x1*x2` sanity check |
 | `experiment/residual-diagnostics` | Real-data model-specification diagnostics |
 | `experiment/prompt-embedding` | Incremental semantic prompt-feature test |
-| `experiment/prompt-routing` | Prompt-only nonlinear-label routing positive control |
+| `experiment/prompt-routing` | Prompt-only real-label routing and synthetic positive control |
 | `backup/current-combined` | Recovery snapshot before branch separation |
 
 Initial combined checkpoint: tag `current-combined-v1`, commit `3905bbf`.
@@ -149,6 +149,66 @@ simulate-llm-routing `
 
 No numerical conclusion is recorded until the user runs this command and the
 result bundle is inspected.
+
+Positive-control result: on the 1,028-example supervised validation split, HGB
+achieved AUC 0.8210 versus 0.7644 for logistic, with lower log loss (0.5129
+versus 0.5694) and lower Brier score (0.1688 versus 0.1919). In online routing,
+ETC + HGB and IGW + HGB exceeded random accuracy at matched traffic across all
+four loss settings; ETC had the lowest empirical decision loss at every
+setting. An audit confirmed exactly 300 forced ETC tastes, no forced IGW tastes,
+and no partial-feedback violations. This supports the implementation sanity
+check without making a claim about real ARC routing signal. Artifact:
+`prompt-forest-sanity-results/simulation-results.zip`. Commit: `79f7a84`.
+
+### Prompt-only 20D real-label fine-grid study, 2026-09-03
+
+Branch: `experiment/prompt-routing`
+
+Research question: on the true cached weak/strong disagreement outcomes, how do
+the HGB-based online policies compare with linear CBPSide across a finer loss
+grid and a broad IGW exploration sweep?
+
+Fixed design:
+
+- cache: `llm-routing-cache-full.zip`, schema v2, 5,173 collected rows and all
+  5,138 eligible rows online;
+- outcome: cached weak/strong disagreement; the cached strong-model answer is
+  the routing reference and ARC gold answers are not routing labels;
+- context: the first 20 components in PCA order from the manifest-defined
+  `prompt_embedding_pca` block; uncertainty and hidden-state features are
+  excluded, and no columns are hardcoded;
+- supervised skyline: a separate stratified 4:1 train-validation split with
+  only linear logistic and HGB;
+- ETC + HGB: 300 forced tastes, one fit, then freeze;
+- CBPSide + linear logistic: no forced tastes and no class bootstrap;
+- IGW + online-refitted HGB: no forced tastes or class bootstrap, `mu=2`, and
+  five fixed gamma settings: 8, 16, 32, 64, and 128;
+- random: match ETC's realized traffic at each loss;
+- inverse-propensity weights remain capped at 10.
+
+The ten decision thresholds are evenly spaced from 0.55 to 0.30. With
+`l11 = 1`, `alpha = 1/l01`, producing:
+
+```text
+alpha = 0.5500, 0.5222, 0.4944, 0.4667, 0.4389,
+        0.4111, 0.3833, 0.3556, 0.3278, 0.3000
+l01  = 1.8182, 1.9149, 2.0225, 2.1429, 2.2785,
+        2.4324, 2.6087, 2.8125, 3.0508, 3.3333
+```
+
+Planned command; implementation work must not execute the experiment:
+
+```powershell
+simulate-llm-routing `
+  --cache llm-routing-cache-full.zip `
+  --outcome-source cached `
+  --experiment all `
+  --output-dir prompt-routing-20-real-results
+```
+
+The full run contains 50 IGW configurations, so it is expected to take much
+longer than the earlier four-loss, single-gamma positive control. Numerical
+results remain to be supplied and interpreted after the user runs it.
 
 ### Nonlinear synthetic sanity check
 
