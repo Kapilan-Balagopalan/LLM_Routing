@@ -8,6 +8,8 @@ dist/
 .env
 .env.*
 *.zip
+!llm-routing-cache-full.zip
+*.log
 *-results/
 holdout-residual-results-strong/
 llm-routing-cache.zip
