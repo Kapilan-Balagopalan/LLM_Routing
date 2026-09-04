@@ -69,16 +69,23 @@ remain in CSV and JSON. Synthetic mode additionally writes
   is the routing reference; ARC gold answers are never routing labels.
 - Loss grid: ten values obtained from evenly spaced decision thresholds
   `alpha = 0.55, ..., 0.30` using `l01 = 1 / alpha` because `l11 = 1`.
-- ETC: 300 initial tastes, then one frozen HGB estimator.
+- HGB capacity study: three profiles with `max_leaf_nodes = 3, 7, 15`.
+  Every profile keeps 50 boosting iterations, learning rate 0.05, minimum leaf
+  size 20, and L2 regularization 1.0.
+- ETC: 300 initial tastes, then one frozen HGB estimator for each capacity.
 - CBPSide: regularized linear logistic regression with no forced tastes and no
   class bootstrap.
-- IGW: five online-refitted HGB policies with
-  `gamma = 8, 16, 32, 64, 128`, `mu = 2`, no forced tastes or class bootstrap,
-  and inverse-propensity weights capped at 10.
+- IGW: one `gamma = 64` policy for each online-refitted HGB capacity, with
+  `mu = 2`, no forced tastes or class bootstrap, and inverse-propensity weights
+  capped at 10.
 - Online accuracy: agreement with the cached strong-model reference, not ARC
   gold-answer accuracy.
-- Supervised skyline: one stratified 4:1 split, with HGB and logistic fit only on
-  the training 80% and evaluated only on the validation 20%.
+- Supervised skyline: one stratified 4:1 split, with logistic and all three HGB
+  capacities fit only on the training 80% and evaluated only on the validation
+  20%.
+- Reproducibility: a common seed is used across all loss thresholds and HGB
+  capacities. Thus a curve is not confounded by changing its random trajectory
+  at every threshold.
 
 Pass alternatives on the command line, for example:
 
@@ -102,6 +109,7 @@ simulate-llm-routing `
   --outcome-source synthetic `
   --prompt-components 64 `
   --igw-gamma-values 16 `
+  --hgb-max-leaf-nodes 15 `
   --l01-values 1.82 2.22 2.67 3.33 `
   --output-dir prompt-forest-sanity-results
 ```

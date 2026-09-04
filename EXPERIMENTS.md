@@ -206,9 +206,44 @@ simulate-llm-routing `
   --output-dir prompt-routing-20-real-results
 ```
 
-The full run contains 50 IGW configurations, so it is expected to take much
-longer than the earlier four-loss, single-gamma positive control. Numerical
-results remain to be supplied and interpreted after the user runs it.
+Result: on the 1,028-row validation split, logistic achieved AUC 0.5715 and the
+15-leaf HGB achieved AUC 0.5633; the difference did not support HGB outperforming
+logistic. CBPSide had the lowest empirical decision loss at all ten thresholds.
+Among the five IGW settings, `gamma=64` had the lowest mean empirical decision
+loss (0.9386), narrowly ahead of `gamma=128` (0.9400). The routing audit covered
+all 5,138 rows, found exactly 300 forced ETC tastes, no forced IGW tastes, and no
+partial-feedback violations. Artifact:
+`prompt-routing-20-real-results/simulation-results.zip`.
+
+### Prompt-only 20D HGB capacity follow-up, 2026-09-04
+
+This follow-up isolates nonlinear model capacity after the gamma sweep:
+
+- retain the same real labels, 20 prompt PCs, ten loss points, 5,138 online
+  rounds, 300 ETC tastes, no IGW/CBPSide tastes, and 4:1 skyline split;
+- use only `gamma=64` and `mu=2` for IGW;
+- compare HGB `max_leaf_nodes = 3, 7, 15`, holding `max_iter=50`, learning rate
+  0.05, `min_samples_leaf=20`, L2 regularization 1.0, and early stopping off;
+- apply all three capacities to both ETC and IGW, and match a random baseline
+  separately to each ETC profile's traffic;
+- compare logistic with all three HGB capacities in the supervised skyline;
+- use the same base seed at every loss threshold for a given policy/profile, so
+  changing alpha does not also change the random trajectory.
+
+Planned command; implementation work must not execute the experiment:
+
+```powershell
+simulate-llm-routing `
+  --cache llm-routing-cache-full.zip `
+  --outcome-source cached `
+  --experiment all `
+  --igw-gamma-values 64 `
+  --hgb-max-leaf-nodes 3 7 15 `
+  --output-dir prompt-routing-20-hgb-capacity-results
+```
+
+No numerical conclusion is recorded until the user runs this command and the
+result bundle is inspected.
 
 ### Nonlinear synthetic sanity check
 

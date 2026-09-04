@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 
-from llm_routing_simulation.algorithm import ONLINE_HGB_PROFILE
+from llm_routing_simulation.algorithm import (
+    DEFAULT_HGB_MAX_LEAF_NODES,
+    ONLINE_HGB_PROFILE,
+)
 
 
 HGB_CAPACITY_PROFILES = (
@@ -271,8 +276,10 @@ def fit_holdout_prompt_skylines(
     *,
     validation_fraction: float = 0.2,
     seed: int = 0,
+    outcome_source: str = "cached",
+    hgb_max_leaf_nodes: Sequence[int] = DEFAULT_HGB_MAX_LEAF_NODES,
 ) -> tuple[list[dict], dict, list[dict]]:
-    """Fit the positive-control logistic and HGB skyline on an 80/20 split."""
+    """Fit logistic and capacity-controlled HGB skylines on an 80/20 split."""
     try:
         from sklearn.ensemble import HistGradientBoostingClassifier
         from sklearn.linear_model import LogisticRegression
@@ -294,6 +301,11 @@ def fit_holdout_prompt_skylines(
         raise ValueError("Holdout skylines require both outcome classes")
     if not 0.0 < validation_fraction < 1.0:
         raise ValueError("validation_fraction must be strictly between zero and one")
+    hgb_max_leaf_nodes = tuple(int(value) for value in hgb_max_leaf_nodes)
+    if not hgb_max_leaf_nodes or any(value < 2 for value in hgb_max_leaf_nodes):
+        raise ValueError("HGB max_leaf_nodes values must be at least two")
+    if len(set(hgb_max_leaf_nodes)) != len(hgb_max_leaf_nodes):
+        raise ValueError("HGB max_leaf_nodes values must be unique")
 
     positions = np.arange(y.size)
     train_positions, validation_positions = train_test_split(
@@ -309,22 +321,33 @@ def fit_holdout_prompt_skylines(
     logistic.fit(X[train_positions], y[train_positions])
     logistic_probabilities = logistic.predict_proba(X[validation_positions])[:, 1]
 
-    hgb = HistGradientBoostingClassifier(
-        loss=ONLINE_HGB_PROFILE["loss"],
-        learning_rate=ONLINE_HGB_PROFILE["learning_rate"],
-        max_iter=ONLINE_HGB_PROFILE["max_iter"],
-        max_leaf_nodes=ONLINE_HGB_PROFILE["max_leaf_nodes"],
-        min_samples_leaf=ONLINE_HGB_PROFILE["min_samples_leaf"],
-        l2_regularization=ONLINE_HGB_PROFILE["l2_regularization"],
-        early_stopping=ONLINE_HGB_PROFILE["early_stopping"],
-        random_state=seed,
-    )
-    hgb.fit(X[train_positions], y[train_positions])
-    hgb_probabilities = hgb.predict_proba(X[validation_positions])[:, 1]
+    hgb_probabilities = {}
+    hgb_configurations = {}
+    for max_leaf_nodes in hgb_max_leaf_nodes:
+        name = f"HGB leaves={max_leaf_nodes} (80/20 holdout)"
+        configuration = ONLINE_HGB_PROFILE | {
+            "name": f"HGB leaves={max_leaf_nodes}",
+            "max_leaf_nodes": int(max_leaf_nodes),
+        }
+        hgb = HistGradientBoostingClassifier(
+            loss=configuration["loss"],
+            learning_rate=configuration["learning_rate"],
+            max_iter=configuration["max_iter"],
+            max_leaf_nodes=configuration["max_leaf_nodes"],
+            min_samples_leaf=configuration["min_samples_leaf"],
+            l2_regularization=configuration["l2_regularization"],
+            early_stopping=configuration["early_stopping"],
+            random_state=seed,
+        )
+        hgb.fit(X[train_positions], y[train_positions])
+        hgb_probabilities[name] = hgb.predict_proba(
+            X[validation_positions]
+        )[:, 1]
+        hgb_configurations[name] = configuration
 
     names_and_probabilities = (
-        ("Logistic (80/20 holdout)", logistic_probabilities),
-        ("HGB (80/20 holdout)", hgb_probabilities),
+        [("Logistic (80/20 holdout)", logistic_probabilities)]
+        + list(hgb_probabilities.items())
     )
     validation_outcomes = y[validation_positions]
     metrics = {
@@ -341,8 +364,7 @@ def fit_holdout_prompt_skylines(
             "max_iter": 5000,
             "preprocessing": "training-split StandardScaler",
         },
-        "HGB (80/20 holdout)": ONLINE_HGB_PROFILE,
-    }
+    } | hgb_configurations
     for name, probabilities in names_and_probabilities:
         model_metrics = metrics[name]
         comparison.append(
@@ -377,9 +399,16 @@ def fit_holdout_prompt_skylines(
         {
             "example_index": int(position),
             "split": "validation",
-            "synthetic_outcome": int(y[position]),
+            "routing_outcome": int(y[position]),
             "logistic_probability": float(logistic_probabilities[index]),
-            "hgb_probability": float(hgb_probabilities[index]),
+            **{
+                f"hgb_leaves_{max_leaf_nodes}_probability": float(
+                    hgb_probabilities[
+                        f"HGB leaves={max_leaf_nodes} (80/20 holdout)"
+                    ][index]
+                )
+                for max_leaf_nodes in hgb_max_leaf_nodes
+            },
         }
         for index, position in enumerate(validation_positions)
     ]
@@ -390,12 +419,15 @@ def fit_holdout_prompt_skylines(
         "train_examples": int(train_positions.size),
         "validation_examples": int(validation_positions.size),
         "context_dimension": int(X.shape[1]),
-        "outcome_source": "synthetic_probabilistic_prompt_forest",
+        "outcome_source": (
+            "synthetic_probabilistic_prompt_forest"
+            if outcome_source == "synthetic"
+            else "cached_weak_strong_disagreement"
+        ),
         "validation_positive_rate": float(np.mean(validation_outcomes)),
         "validation_agreement_rate": float(np.mean(validation_outcomes == 0)),
         "model_comparison": comparison,
-        "plot_models": [name for name, _ in names_and_probabilities]
-        + ["Random routing (expected)"],
+        "plot_models": [name for name, _ in names_and_probabilities],
     }
     return rows, summary, prediction_rows
 

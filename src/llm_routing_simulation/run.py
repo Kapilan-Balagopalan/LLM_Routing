@@ -13,6 +13,7 @@ from typing import Any, Iterable
 import numpy as np
 
 from llm_routing_simulation.algorithm import (
+    DEFAULT_HGB_MAX_LEAF_NODES,
     HGBETCPlayer,
     IGWPlayer,
     LogCBPSideATConfig,
@@ -20,10 +21,7 @@ from llm_routing_simulation.algorithm import (
 )
 from llm_routing_simulation.cache import RoutingCache, load_cache
 from llm_routing_simulation.environment import LLMCascadeEnvironment
-from llm_routing_simulation.skyline import (
-    fit_holdout_prompt_skylines,
-    random_routing_reference,
-)
+from llm_routing_simulation.skyline import fit_holdout_prompt_skylines
 from llm_routing_simulation.synthetic_prompt import (
     generate_synthetic_prompt_outcomes,
 )
@@ -31,9 +29,15 @@ from llm_routing_simulation.synthetic_prompt import (
 
 SKYLINE_PLOT_MODELS = (
     "Logistic (80/20 holdout)",
-    "HGB (80/20 holdout)",
-    "Random routing (expected)",
+    *(
+        f"HGB leaves={max_leaf_nodes} (80/20 holdout)"
+        for max_leaf_nodes in DEFAULT_HGB_MAX_LEAF_NODES
+    ),
 )
+
+DEFAULT_ALPHA_VALUES = tuple(np.linspace(0.55, 0.30, 10))
+DEFAULT_L01_VALUES = tuple(1.0 / alpha for alpha in DEFAULT_ALPHA_VALUES)
+DEFAULT_IGW_GAMMA_VALUES = (64.0,)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -41,14 +45,23 @@ def _parser() -> argparse.ArgumentParser:
         description="Replay online routing algorithms and supervised skylines offline."
     )
     parser.add_argument("--cache", required=True, type=Path)
-    parser.add_argument("--prompt-components", type=int, default=64)
+    parser.add_argument("--prompt-components", type=int, default=20)
+    parser.add_argument(
+        "--outcome-source",
+        choices=("cached", "synthetic"),
+        default="cached",
+        help=(
+            "Use cached weak/strong disagreement for the real experiment or "
+            "the committed forest positive control"
+        ),
+    )
     parser.add_argument(
         "--experiment", choices=("all", "online", "skyline"), default="all"
     )
     parser.add_argument("--output-dir", type=Path, default=Path("simulation-results"))
     parser.add_argument("--limit", type=int, help="Optional prefix of eligible rows")
     parser.add_argument(
-        "--l01-values", type=float, nargs="+", default=[1.82, 2.22, 2.67, 3.33]
+        "--l01-values", type=float, nargs="+", default=list(DEFAULT_L01_VALUES)
     )
     parser.add_argument("--l11", type=float, default=1.0)
     parser.add_argument("--etc-tastes", type=int, default=300)
@@ -58,7 +71,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--igw-min-tastes", type=int, default=0)
     parser.add_argument("--igw-bootstrap-per-class", type=int, default=0)
     parser.add_argument("--igw-bootstrap-max-tastes", type=int, default=0)
-    parser.add_argument("--igw-gamma", type=float, default=16.0)
+    parser.add_argument(
+        "--igw-gamma-values",
+        type=float,
+        nargs="+",
+        default=list(DEFAULT_IGW_GAMMA_VALUES),
+    )
+    parser.add_argument(
+        "--hgb-max-leaf-nodes",
+        type=int,
+        nargs="+",
+        default=list(DEFAULT_HGB_MAX_LEAF_NODES),
+        help="HGB capacity profiles; every other HGB setting is held fixed",
+    )
     parser.add_argument("--igw-mu", type=float, default=2.0)
     parser.add_argument("--igw-min-propensity", type=float, default=0.1)
     parser.add_argument("--random-repeats", type=int, default=100)
@@ -88,30 +113,43 @@ def _prompt_context_rounds(
     prompt_components: int,
     limit: int | None,
     seed: int = 0,
+    outcome_source: str = "cached",
 ):
-    """Attach prompt contexts and one frozen synthetic outcome to every round."""
+    """Attach manifest-selected prompt contexts and the requested outcome source."""
+    if outcome_source not in {"cached", "synthetic"}:
+        raise ValueError("outcome_source must be 'cached' or 'synthetic'")
     all_rounds = cache.eligible_rounds()
     all_contexts, block = cache.context_block(
         "prompt_embedding_pca", components=prompt_components
     )
     eligible_contexts = all_contexts[cache.eligible_indices]
-    teacher_probabilities, synthetic_outcomes, teacher_summary = (
-        generate_synthetic_prompt_outcomes(eligible_contexts, seed=seed)
-    )
+    teacher_summary = None
+    synthetic_rows: list[dict] = []
+    teacher_probabilities = None
+    synthetic_outcomes = None
+    if outcome_source == "synthetic":
+        teacher_probabilities, synthetic_outcomes, teacher_summary = (
+            generate_synthetic_prompt_outcomes(eligible_contexts, seed=seed)
+        )
     if limit is not None:
         if limit < 1:
             raise ValueError("--limit must be positive")
         all_rounds = all_rounds[:limit]
         eligible_contexts = eligible_contexts[:limit]
-        teacher_probabilities = teacher_probabilities[:limit]
-        synthetic_outcomes = synthetic_outcomes[:limit]
+        if teacher_probabilities is not None and synthetic_outcomes is not None:
+            teacher_probabilities = teacher_probabilities[:limit]
+            synthetic_outcomes = synthetic_outcomes[:limit]
     if not all_rounds:
         raise ValueError("The cache has no eligible weak/strong answer pairs")
     prompt_rounds = [
         replace(
             item,
             context=eligible_contexts[index].copy(),
-            outcome_override=int(synthetic_outcomes[index]),
+            outcome_override=(
+                int(synthetic_outcomes[index])
+                if synthetic_outcomes is not None
+                else None
+            ),
         )
         for index, item in enumerate(all_rounds)
     ]
@@ -122,25 +160,34 @@ def _prompt_context_rounds(
         "pca_scope": cache.manifest.get("pca_scope"),
         "fit_scope": "precomputed across all collected prompts",
         "outcome_or_answer_features_used": False,
+        "component_selection": "first components in manifest-defined PCA order",
     }
-    teacher_summary["probabilities_stored_in_player_observations"] = False
-    teacher_summary["selected_examples"] = len(prompt_rounds)
-    teacher_summary["selected_probability_mean"] = float(
-        np.mean(teacher_probabilities)
-    )
-    synthetic_rows = [
-        {
-            "t": index + 1,
-            "id": item.example_id,
-            "teacher_probability": float(teacher_probabilities[index]),
-            "synthetic_outcome": int(synthetic_outcomes[index]),
-        }
-        for index, item in enumerate(prompt_rounds)
-    ]
+    if teacher_summary is not None:
+        teacher_summary["probabilities_stored_in_player_observations"] = False
+        teacher_summary["selected_examples"] = len(prompt_rounds)
+        teacher_summary["selected_probability_mean"] = float(
+            np.mean(teacher_probabilities)
+        )
+        synthetic_rows = [
+            {
+                "t": index + 1,
+                "id": item.example_id,
+                "teacher_probability": float(teacher_probabilities[index]),
+                "synthetic_outcome": int(synthetic_outcomes[index]),
+            }
+            for index, item in enumerate(prompt_rounds)
+        ]
     return prompt_rounds, context_summary, teacher_summary, synthetic_rows
 
 
-def _run_one_player(method: str, player, config, rounds, progress_label: str):
+def _run_one_player(
+    method: str,
+    player,
+    config,
+    rounds,
+    progress_label: str,
+    metric: str,
+):
     environment = LLMCascadeEnvironment(rounds)
     correct = 0
     routed = 0
@@ -153,7 +200,7 @@ def _run_one_player(method: str, player, config, rounds, progress_label: str):
         transition = environment.step(decision_wrapper.action)
         player.update(transition.action, observation.context, transition.outcome)
 
-        # Evaluation can inspect the synthetic outcome after acting, while the
+        # Evaluation may inspect the routing outcome after acting, while the
         # player still receives it only when action 1 was selected.
         evaluation_outcome = rounds[transition.t - 1].routing_outcome
         correct += int(transition.action == 1 or evaluation_outcome == 0)
@@ -170,7 +217,7 @@ def _run_one_player(method: str, player, config, rounds, progress_label: str):
                 "weak_answer": observation.weak_answer,
                 "action": transition.action,
                 "feedback_revealed_to_player": transition.outcome,
-                "evaluation_only_synthetic_outcome": evaluation_outcome,
+                "evaluation_only_routing_outcome": evaluation_outcome,
                 "predicted_disagreement": getattr(
                     decision, "predicted_disagreement", None
                 ),
@@ -187,6 +234,11 @@ def _run_one_player(method: str, player, config, rounds, progress_label: str):
                 "igw_gamma": getattr(decision, "gamma", None),
                 "effective_sample_size": getattr(
                     decision, "effective_sample_size", None
+                ),
+                "hgb_max_leaf_nodes": getattr(
+                    getattr(player, "estimator", None),
+                    "max_leaf_nodes",
+                    None,
                 ),
             }
         )
@@ -206,7 +258,7 @@ def _run_one_player(method: str, player, config, rounds, progress_label: str):
             ),
             "routing_rate": routed / len(rounds),
             "accuracy": correct / len(rounds),
-            "metric": "synthetic_routing_accuracy",
+            "metric": metric,
             "examples": len(rounds),
             "min_tastes": getattr(player, "min_tastes", config.min_tastes),
             "bootstrap_per_class": getattr(player, "bootstrap_per_class", None),
@@ -220,13 +272,25 @@ def _run_one_player(method: str, player, config, rounds, progress_label: str):
             ),
             "igw_gamma": getattr(player, "fixed_gamma", None),
             "igw_mu": getattr(player, "mu", None),
+            "hgb_max_leaf_nodes": getattr(
+                getattr(player, "estimator", None),
+                "max_leaf_nodes",
+                None,
+            ),
         },
         trajectories,
     )
 
 
 def _random_matched(
-    rounds, target_rate: float, l01: float, l11: float, repeats: int, seed: int
+    rounds,
+    target_rate: float,
+    l01: float,
+    l11: float,
+    repeats: int,
+    seed: int,
+    metric: str,
+    hgb_max_leaf_nodes: int,
 ):
     rng = np.random.default_rng(seed)
     outcomes = np.asarray(
@@ -238,24 +302,30 @@ def _random_matched(
         rates.append(float(np.mean(routed)))
         accuracies.append(float(np.mean(routed | ~outcomes)))
     return {
-        "method": "Random (matched ETC)",
+        "method": f"Random (matched ETC HGB leaves={hgb_max_leaf_nodes})",
         "l01": l01,
         "l11": l11,
         "alpha": 1.0 / (1.0 + l01 - l11),
         "routing_rate": float(np.mean(rates)),
         "accuracy": float(np.mean(accuracies)),
         "accuracy_std": float(np.std(accuracies)),
-        "metric": "synthetic_routing_accuracy",
+        "metric": metric,
         "examples": len(rounds),
         "random_repeats": repeats,
+        "hgb_max_leaf_nodes": hgb_max_leaf_nodes,
     }
 
 
 def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
     """Run HGB ETC/IGW, linear-logistic CBPSide, and matched random."""
     context_dim = int(rounds[0].context.size)
+    metric = (
+        "synthetic_routing_accuracy"
+        if args.outcome_source == "synthetic"
+        else "agreement_with_strong_llm"
+    )
     rows, trajectories = [], []
-    for loss_index, l01 in enumerate(args.l01_values):
+    for l01 in args.l01_values:
         base = LogCBPSideATConfig(
             loss_reject_disagreement=l01,
             loss_route_disagreement=args.l11,
@@ -272,51 +342,74 @@ def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
             use_confidence_bound=True,
             beta_scale=base.beta_scale * 0.5,
         )
-        players = [
-            (
-                "ETC",
+        cbpside_result, cbpside_path = _run_one_player(
+            "CBPSide",
+            LogCBPSideATPlayer(context_dim, cbpside),
+            cbpside,
+            rounds,
+            f"l01={l01:g} CBPSide",
+            metric,
+        )
+        rows.append(cbpside_result)
+        trajectories.extend(cbpside_path)
+
+        for profile_index, max_leaf_nodes in enumerate(args.hgb_max_leaf_nodes):
+            etc_method = f"ETC HGB leaves={max_leaf_nodes}"
+            etc_result, etc_path = _run_one_player(
+                etc_method,
                 HGBETCPlayer(
-                    context_dim, base, seed=args.seed + loss_index
-                ),
-                base,
-            ),
-            ("CBPSide", LogCBPSideATPlayer(context_dim, cbpside), cbpside),
-            (
-                f"IGW gamma={args.igw_gamma:g}",
-                IGWPlayer(
                     context_dim,
                     base,
-                    len(rounds),
-                    min_tastes=args.igw_min_tastes,
-                    bootstrap_per_class=args.igw_bootstrap_per_class,
-                    bootstrap_max_tastes=args.igw_bootstrap_max_tastes,
-                    mu=args.igw_mu,
-                    fixed_gamma=args.igw_gamma,
-                    min_propensity=args.igw_min_propensity,
-                    seed=args.seed + loss_index,
+                    hgb_max_leaf_nodes=max_leaf_nodes,
+                    seed=args.seed,
                 ),
                 base,
-            ),
-        ]
-        etc_row = None
-        for method, player, config in players:
-            result, path = _run_one_player(
-                method, player, config, rounds, f"l01={l01:g} {method}"
-            )
-            rows.append(result)
-            trajectories.extend(path)
-            if method == "ETC":
-                etc_row = result
-        rows.append(
-            _random_matched(
                 rounds,
-                etc_row["routing_rate"],
-                l01,
-                args.l11,
-                args.random_repeats,
-                args.seed + 10_000 + loss_index,
+                f"l01={l01:g} {etc_method}",
+                metric,
             )
-        )
+            rows.append(etc_result)
+            trajectories.extend(etc_path)
+
+            for gamma in args.igw_gamma_values:
+                igw_method = (
+                    f"IGW gamma={gamma:g} HGB leaves={max_leaf_nodes}"
+                )
+                igw_result, igw_path = _run_one_player(
+                    igw_method,
+                    IGWPlayer(
+                        context_dim,
+                        base,
+                        len(rounds),
+                        min_tastes=args.igw_min_tastes,
+                        bootstrap_per_class=args.igw_bootstrap_per_class,
+                        bootstrap_max_tastes=args.igw_bootstrap_max_tastes,
+                        mu=args.igw_mu,
+                        fixed_gamma=gamma,
+                        min_propensity=args.igw_min_propensity,
+                        hgb_max_leaf_nodes=max_leaf_nodes,
+                        seed=args.seed,
+                    ),
+                    base,
+                    rounds,
+                    f"l01={l01:g} {igw_method}",
+                    metric,
+                )
+                rows.append(igw_result)
+                trajectories.extend(igw_path)
+
+            rows.append(
+                _random_matched(
+                    rounds,
+                    etc_result["routing_rate"],
+                    l01,
+                    args.l11,
+                    args.random_repeats,
+                    args.seed + 10_000 + profile_index,
+                    metric,
+                    max_leaf_nodes,
+                )
+            )
     return rows, trajectories
 
 
@@ -324,6 +417,8 @@ def run_skyline(
     rounds,
     validation_fraction: float,
     seed: int,
+    outcome_source: str,
+    hgb_max_leaf_nodes,
 ):
     contexts = np.stack([item.context for item in rounds])
     outcomes = np.asarray(
@@ -334,9 +429,8 @@ def run_skyline(
         outcomes,
         validation_fraction=validation_fraction,
         seed=seed,
-    )
-    rows.extend(
-        random_routing_reference(summary["validation_agreement_rate"])
+        outcome_source=outcome_source,
+        hgb_max_leaf_nodes=hgb_max_leaf_nodes,
     )
     for row in prediction_rows:
         row["id"] = rounds[row["example_index"]].example_id
@@ -361,7 +455,12 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
             )
 
 
-def _plot(output: Path, online_rows: list[dict], skyline_rows: list[dict]) -> None:
+def _plot(
+    output: Path,
+    online_rows: list[dict],
+    skyline_rows: list[dict],
+    outcome_source: str,
+) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -379,7 +478,11 @@ def _plot(output: Path, online_rows: list[dict], skyline_rows: list[dict]) -> No
                 marker="o",
                 label=method,
             )
-        axes[0].set_title("Online routing on synthetic outcomes")
+        axes[0].set_title(
+            "Online routing on synthetic outcomes"
+            if outcome_source == "synthetic"
+            else "Online routing on cached disagreement"
+        )
         axes[0].legend(fontsize=8)
     else:
         axes[0].text(0.5, 0.5, "Online experiment not requested", ha="center")
@@ -396,15 +499,27 @@ def _plot(output: Path, online_rows: list[dict], skyline_rows: list[dict]) -> No
                 linewidth=2.5 if any(row.get("selected") for row in selected) else 1.2,
                 label=model,
             )
-        axes[1].set_title("Supervised 80/20 synthetic skyline")
+        axes[1].set_title(
+            "Supervised 80/20 synthetic skyline"
+            if outcome_source == "synthetic"
+            else "Supervised 80/20 real-label skyline"
+        )
         axes[1].legend(fontsize=7)
     else:
         axes[1].text(0.5, 0.5, "Skyline experiment not requested", ha="center")
     for axis in axes:
         axis.set_xlim(0, 1)
         axis.set_ylim(0, 1)
-        axis.set_xlabel("Action-1 routing rate")
-        axis.set_ylabel("Synthetic routing accuracy")
+        axis.set_xlabel(
+            "Action-1 routing rate"
+            if outcome_source == "synthetic"
+            else "Strong-model routing rate"
+        )
+        axis.set_ylabel(
+            "Synthetic routing accuracy"
+            if outcome_source == "synthetic"
+            else "Agreement with cached strong-model reference"
+        )
         axis.grid(alpha=0.25)
     figure.savefig(output, dpi=180)
     plt.close(figure)
@@ -425,6 +540,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise SystemExit("Every l01 must be greater than or equal to l11")
     if args.random_repeats < 1:
         raise SystemExit("Random repeats must be positive")
+    if any(value <= 0.0 for value in args.igw_gamma_values):
+        raise SystemExit("Every IGW gamma value must be positive")
+    if any(value < 2 for value in args.hgb_max_leaf_nodes):
+        raise SystemExit("Every HGB max_leaf_nodes value must be at least two")
+    if len(set(args.hgb_max_leaf_nodes)) != len(args.hgb_max_leaf_nodes):
+        raise SystemExit("HGB max_leaf_nodes values must be unique")
     if not 0.0 < args.skyline_validation_fraction < 1.0:
         raise SystemExit(
             "Skyline validation fraction must be strictly between zero and one"
@@ -447,11 +568,13 @@ def main(argv: Iterable[str] | None = None) -> int:
             args.prompt_components,
             args.limit,
             args.seed,
+            args.outcome_source,
         )
     )
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    _write_csv(output / "synthetic_outcomes.csv", synthetic_rows)
+    if synthetic_rows:
+        _write_csv(output / "synthetic_outcomes.csv", synthetic_rows)
     print(
         f"Loaded {len(rounds)} eligible rows; context dimension "
         f"{rounds[0].context.size}.",
@@ -479,6 +602,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             rounds,
             args.skyline_validation_fraction,
             args.seed,
+            args.outcome_source,
+            args.hgb_max_leaf_nodes,
         )
         _write_csv(output / "supervised_skyline.csv", skyline_rows)
         (output / "supervised_skyline.json").write_text(
@@ -500,17 +625,40 @@ def main(argv: Iterable[str] | None = None) -> int:
         "examples": len(rounds),
         "context_dimension": int(rounds[0].context.size),
         "context": context_summary,
-        "routing_reference": "synthetic_prompt_forest_outcome",
-        "purpose": "positive-control sanity check for routing implementations",
+        "outcome_source": args.outcome_source,
+        "routing_reference": (
+            "synthetic_prompt_forest_outcome"
+            if args.outcome_source == "synthetic"
+            else "cached_strong_model_answer"
+        ),
+        "arc_gold_answers_used_as_routing_labels": False,
+        "purpose": (
+            "positive-control sanity check for routing implementations"
+            if args.outcome_source == "synthetic"
+            else "prompt-only routing study on cached weak/strong disagreement"
+        ),
         "synthetic_teacher": teacher_summary,
+        "loss_grid": [
+            {
+                "l01": float(value),
+                "alpha": float(1.0 / (1.0 + value - args.l11)),
+            }
+            for value in args.l01_values
+        ],
         "experiment": args.experiment,
-        "parameters": vars(args) | {"cache": str(args.cache), "output_dir": str(args.output_dir)},
+        "parameters": vars(args)
+        | {"cache": str(args.cache), "output_dir": str(args.output_dir)},
         "skyline": skyline_summary,
     }
     (output / "summary.json").write_text(
         json.dumps(_jsonable(summary), indent=2), encoding="utf-8"
     )
-    _plot(output / "routing_comparison.png", online_rows, skyline_rows)
+    _plot(
+        output / "routing_comparison.png",
+        online_rows,
+        skyline_rows,
+        args.outcome_source,
+    )
     bundle = _bundle(output)
     print(f"Finished. Results: {bundle}", flush=True)
     return 0

@@ -89,11 +89,14 @@ It checks that updates correspond to the pending action and context.
 
 - `HGBETCPlayer`: routes strongly for 300 rounds, fits one histogram gradient
   boosting classifier from those revealed labels, and freezes that estimator.
+  The active capacity study repeats this policy with 3, 7, and 15 maximum
+  leaves per boosting tree while holding every other HGB setting fixed.
 - `LogCBPSideATPlayer`: estimates a regularized linear logistic disagreement
   model and applies the CBPSide confidence rule without forced tastes.
 - `IGWPlayer`: estimates disagreement using an online-refitted histogram
   gradient boosting classifier and samples an arm using inverse-gap weighting.
-  The active sweep uses `mu=2` and `gamma` values 8, 16, 32, 64, and 128.
+  The active study uses `mu=2`, fixed `gamma=64`, and the same 3-, 7-, and
+  15-leaf HGB capacity profiles as ETC.
 - `RevealedFeedbackEstimator`: extracts only action-1 observations and applies
   capped inverse-propensity weights when supplied.
 
@@ -117,11 +120,11 @@ and unrevealed synthetic labels are never given to an online player.
 
 ### `skyline.py`
 
-For the active prompt study, performs one stratified 80/20 split and fits only
-linear logistic and the exact HGB profile used by the online nonlinear players
-on the training portion. Classification metrics and threshold skylines are
-evaluated only on validation predictions. The module also retains broader cross-validated
-model-comparison functions used by earlier branches.
+For the active prompt study, performs one stratified 80/20 split and fits linear
+logistic plus the three exact HGB capacity profiles used by the online nonlinear
+players on the training portion. Classification metrics and threshold skylines
+are evaluated only on validation predictions. The module also retains broader
+cross-validated model-comparison functions used by earlier branches.
 
 ### `run.py`
 

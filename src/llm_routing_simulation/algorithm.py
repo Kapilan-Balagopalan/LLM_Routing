@@ -21,6 +21,8 @@ ONLINE_HGB_PROFILE = {
     "early_stopping": False,
 }
 
+DEFAULT_HGB_MAX_LEAF_NODES = (3, 7, 15)
+
 
 @dataclass(frozen=True)
 class LogCBPSideATConfig:
@@ -462,6 +464,19 @@ class RevealedFeedbackEstimator:
 class HGBEstimator(RevealedFeedbackEstimator):
     """Histogram gradient-boosting estimator for prompt-PCA contexts."""
 
+    def __init__(
+        self,
+        context_dim: int,
+        *,
+        max_features: int | None = None,
+        max_leaf_nodes: int = ONLINE_HGB_PROFILE["max_leaf_nodes"],
+        seed: int = 0,
+    ) -> None:
+        super().__init__(context_dim, max_features=max_features, seed=seed)
+        if max_leaf_nodes < 2:
+            raise ValueError("HGB max_leaf_nodes must be at least two")
+        self.max_leaf_nodes = int(max_leaf_nodes)
+
     @property
     def estimator_name(self) -> str:
         return "hist_gradient_boosting"
@@ -473,7 +488,7 @@ class HGBEstimator(RevealedFeedbackEstimator):
             loss=ONLINE_HGB_PROFILE["loss"],
             learning_rate=ONLINE_HGB_PROFILE["learning_rate"],
             max_iter=ONLINE_HGB_PROFILE["max_iter"],
-            max_leaf_nodes=ONLINE_HGB_PROFILE["max_leaf_nodes"],
+            max_leaf_nodes=self.max_leaf_nodes,
             min_samples_leaf=ONLINE_HGB_PROFILE["min_samples_leaf"],
             l2_regularization=ONLINE_HGB_PROFILE["l2_regularization"],
             early_stopping=ONLINE_HGB_PROFILE["early_stopping"],
@@ -490,13 +505,17 @@ class HGBETCPlayer(HistoryBasedPlayer):
         config: LogCBPSideATConfig,
         *,
         estimator_max_features: int | None = None,
+        hgb_max_leaf_nodes: int = ONLINE_HGB_PROFILE["max_leaf_nodes"],
         seed: int = 0,
     ) -> None:
         super().__init__(context_dim)
         self.config = config
         self.min_tastes = config.min_tastes
         self.estimator = HGBEstimator(
-            context_dim, max_features=estimator_max_features, seed=seed
+            context_dim,
+            max_features=estimator_max_features,
+            max_leaf_nodes=hgb_max_leaf_nodes,
+            seed=seed,
         )
         self.last_decision: ETCDecision | None = None
 
@@ -592,6 +611,7 @@ class IGWPlayer(HistoryBasedPlayer):
         fixed_gamma: float | None = 16.0,
         min_propensity: float = 0.1,
         estimator_max_features: int | None = None,
+        hgb_max_leaf_nodes: int = ONLINE_HGB_PROFILE["max_leaf_nodes"],
         seed: int = 0,
     ) -> None:
         super().__init__(context_dim)
@@ -610,7 +630,10 @@ class IGWPlayer(HistoryBasedPlayer):
                 "nonnegative bootstrap settings, and min propensity in (0,1]"
             )
         self.estimator = HGBEstimator(
-            context_dim, max_features=estimator_max_features, seed=seed
+            context_dim,
+            max_features=estimator_max_features,
+            max_leaf_nodes=hgb_max_leaf_nodes,
+            seed=seed,
         )
         self.config = config
         self.total_samples = total_samples

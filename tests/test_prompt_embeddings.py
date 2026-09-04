@@ -146,6 +146,7 @@ def test_prompt_context_rounds_use_manifest_block_before_limit():
         prompt_components=4,
         limit=3,
         seed=0,
+        outcome_source="cached",
     )
     assert len(rounds) == 3
     assert all(round_.context.shape == (4,) for round_ in rounds)
@@ -158,6 +159,21 @@ def test_prompt_context_rounds_use_manifest_block_before_limit():
     assert summary["context_block"]["stop"] == 8
     assert summary["outcome_or_answer_features_used"] is False
     assert summary["fit_scope"] == "precomputed across all collected prompts"
+    assert summary["component_selection"] == (
+        "first components in manifest-defined PCA order"
+    )
+    assert teacher_summary is None
+    assert synthetic_rows == []
+    assert [round_.outcome_override for round_ in rounds] == [None, None, None]
+    assert [round_.routing_outcome for round_ in rounds] == [0, 1, 0]
+
+    synthetic_rounds, _, teacher_summary, synthetic_rows = _prompt_context_rounds(
+        cache,
+        prompt_components=4,
+        limit=3,
+        seed=0,
+        outcome_source="synthetic",
+    )
     assert teacher_summary["examples"] == 6
     assert teacher_summary["selected_examples"] == 3
     assert len(synthetic_rows) == 3
@@ -166,7 +182,7 @@ def test_prompt_context_rounds_use_manifest_block_before_limit():
         "arc-1",
         "arc-2",
     ]
-    assert [round_.routing_outcome for round_ in rounds] == [
+    assert [round_.routing_outcome for round_ in synthetic_rounds] == [
         row["synthetic_outcome"] for row in synthetic_rows
     ]
 

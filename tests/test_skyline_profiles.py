@@ -1,6 +1,8 @@
 import numpy as np
 
+import llm_routing_simulation.run as run_module
 from llm_routing_simulation.algorithm import (
+    DEFAULT_HGB_MAX_LEAF_NODES,
     ONLINE_HGB_PROFILE,
     HGBETCPlayer,
     HGBEstimator,
@@ -17,7 +19,13 @@ from llm_routing_simulation.skyline import (
     plot_binary_residuals,
     plot_residual_predictability,
 )
-from llm_routing_simulation.run import SKYLINE_PLOT_MODELS, _parser
+from llm_routing_simulation.run import (
+    DEFAULT_ALPHA_VALUES,
+    DEFAULT_IGW_GAMMA_VALUES,
+    SKYLINE_PLOT_MODELS,
+    _parser,
+)
+from llm_routing_simulation.environment import CascadeRound
 
 
 def test_skyline_stops_at_hgb_350():
@@ -30,8 +38,9 @@ def test_skyline_stops_at_hgb_350():
 def test_main_skyline_plot_is_limited_to_research_comparison():
     assert SKYLINE_PLOT_MODELS == (
         "Logistic (80/20 holdout)",
-        "HGB (80/20 holdout)",
-        "Random routing (expected)",
+        "HGB leaves=3 (80/20 holdout)",
+        "HGB leaves=7 (80/20 holdout)",
+        "HGB leaves=15 (80/20 holdout)",
     )
 
 
@@ -53,6 +62,18 @@ def test_online_etc_and_igw_use_hgb_configuration():
     assert etc.estimator.estimator_name == "hist_gradient_boosting"
     assert isinstance(igw.estimator, HGBEstimator)
     assert igw.estimator.estimator_name == "hist_gradient_boosting"
+    assert DEFAULT_HGB_MAX_LEAF_NODES == (3, 7, 15)
+
+
+def test_online_hgb_capacity_is_configurable_without_changing_other_settings():
+    estimator = HGBEstimator(8, max_leaf_nodes=7, seed=12)
+    model = estimator._new_model()
+    assert estimator.max_leaf_nodes == 7
+    assert model.max_leaf_nodes == 7
+    assert model.max_iter == ONLINE_HGB_PROFILE["max_iter"]
+    assert model.learning_rate == ONLINE_HGB_PROFILE["learning_rate"]
+    assert model.min_samples_leaf == ONLINE_HGB_PROFILE["min_samples_leaf"]
+    assert model.l2_regularization == ONLINE_HGB_PROFILE["l2_regularization"]
 
 
 def test_hgb_etc_fits_after_exact_taste_budget_and_then_freezes():
@@ -123,7 +144,8 @@ def test_cbpside_class_bootstrap_until_balanced_or_capped():
 
 def test_online_exploration_defaults():
     args = _parser().parse_args(["--cache", "fixture.zip"])
-    assert args.prompt_components == 64
+    assert args.prompt_components == 20
+    assert args.outcome_source == "cached"
     assert args.etc_tastes == 300
     assert args.cbpside_tastes == 0
     assert args.cbpside_bootstrap_per_class == 0
@@ -132,8 +154,74 @@ def test_online_exploration_defaults():
     assert args.igw_bootstrap_per_class == 0
     assert args.igw_bootstrap_max_tastes == 0
     assert args.igw_mu == 2.0
-    assert args.igw_gamma == 16.0
+    assert args.igw_gamma_values == list(DEFAULT_IGW_GAMMA_VALUES)
+    assert DEFAULT_IGW_GAMMA_VALUES == (64.0,)
+    assert args.hgb_max_leaf_nodes == [3, 7, 15]
+    assert len(args.l01_values) == 10
+    assert np.allclose(
+        [1.0 / value for value in args.l01_values],
+        DEFAULT_ALPHA_VALUES,
+    )
+    assert np.allclose(DEFAULT_ALPHA_VALUES, np.linspace(0.55, 0.30, 10))
     assert args.skyline_validation_fraction == 0.2
+
+
+def test_online_sweep_runs_every_hgb_capacity_with_fixed_gamma(monkeypatch):
+    args = _parser().parse_args(["--cache", "fixture.zip"])
+    args.l01_values = [2.0]
+    round_ = CascadeRound(
+        example_id="arc-1",
+        prompt="prompt",
+        context=np.asarray([0.1, -0.2]),
+        weak_answer="A",
+        strong_answer="B",
+        gold_answer="B",
+    )
+
+    def fake_run(method, player, config, rounds, progress_label, metric):
+        return {"method": method, "routing_rate": 0.5}, []
+
+    monkeypatch.setattr(run_module, "_run_one_player", fake_run)
+    rows, trajectories = run_module.run_online([round_], args)
+
+    assert trajectories == []
+    assert [row["method"] for row in rows] == [
+        "CBPSide",
+        "ETC HGB leaves=3",
+        "IGW gamma=64 HGB leaves=3",
+        "Random (matched ETC HGB leaves=3)",
+        "ETC HGB leaves=7",
+        "IGW gamma=64 HGB leaves=7",
+        "Random (matched ETC HGB leaves=7)",
+        "ETC HGB leaves=15",
+        "IGW gamma=64 HGB leaves=15",
+        "Random (matched ETC HGB leaves=15)",
+    ]
+
+
+def test_online_hgb_seed_is_constant_across_loss_points(monkeypatch):
+    args = _parser().parse_args(["--cache", "fixture.zip", "--seed", "19"])
+    args.l01_values = [2.0, 3.0]
+    args.hgb_max_leaf_nodes = [7]
+    round_ = CascadeRound(
+        example_id="arc-1",
+        prompt="prompt",
+        context=np.asarray([0.1, -0.2]),
+        weak_answer="A",
+        strong_answer="B",
+        gold_answer="B",
+    )
+    observed_seeds = []
+
+    def fake_run(method, player, config, rounds, progress_label, metric):
+        if hasattr(player, "estimator"):
+            observed_seeds.append(player.estimator.seed)
+        return {"method": method, "routing_rate": 0.5}, []
+
+    monkeypatch.setattr(run_module, "_run_one_player", fake_run)
+    run_module.run_online([round_], args)
+
+    assert observed_seeds == [19, 19, 19, 19]
 
 
 def test_holdout_prompt_skyline_uses_four_to_one_split():
@@ -152,15 +240,27 @@ def test_holdout_prompt_skyline_uses_four_to_one_split():
     assert summary["validation_examples"] == 40
     assert summary["fit_scope"] == "single stratified 80/20 train-validation holdout"
     assert len(predictions) == 40
+    assert all("routing_outcome" in row for row in predictions)
+    assert summary["outcome_source"] == "cached_weak_strong_disagreement"
+    assert summary["plot_models"] == [
+        "Logistic (80/20 holdout)",
+        "HGB leaves=3 (80/20 holdout)",
+        "HGB leaves=7 (80/20 holdout)",
+        "HGB leaves=15 (80/20 holdout)",
+    ]
     assert {row["model"] for row in rows} == {
         "Logistic (80/20 holdout)",
-        "HGB (80/20 holdout)",
+        "HGB leaves=3 (80/20 holdout)",
+        "HGB leaves=7 (80/20 holdout)",
+        "HGB leaves=15 (80/20 holdout)",
     }
     assert {
         row["model"] for row in summary["model_comparison"]
     } == {
         "Logistic (80/20 holdout)",
-        "HGB (80/20 holdout)",
+        "HGB leaves=3 (80/20 holdout)",
+        "HGB leaves=7 (80/20 holdout)",
+        "HGB leaves=15 (80/20 holdout)",
     }
 
 
