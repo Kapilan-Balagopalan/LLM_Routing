@@ -144,6 +144,7 @@ def test_cbpside_class_bootstrap_until_balanced_or_capped():
 
 def test_online_exploration_defaults():
     args = _parser().parse_args(["--cache", "fixture.zip"])
+    assert args.context_profile == "prompt-only"
     assert args.prompt_components == 20
     assert args.outcome_source == "cached"
     assert args.etc_tastes == 300
@@ -164,6 +165,21 @@ def test_online_exploration_defaults():
     )
     assert np.allclose(DEFAULT_ALPHA_VALUES, np.linspace(0.55, 0.30, 10))
     assert args.skyline_validation_fraction == 0.2
+
+
+def test_uncertainty_prompt_context_profile_is_explicitly_selectable():
+    args = _parser().parse_args(
+        [
+            "--cache",
+            "fixture.zip",
+            "--context-profile",
+            "uncertainty-prompt",
+            "--prompt-components",
+            "32",
+        ]
+    )
+    assert args.context_profile == "uncertainty-prompt"
+    assert args.prompt_components == 32
 
 
 def test_online_sweep_runs_every_hgb_capacity_with_fixed_gamma(monkeypatch):

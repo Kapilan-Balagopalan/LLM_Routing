@@ -45,6 +45,15 @@ def _parser() -> argparse.ArgumentParser:
         description="Replay online routing algorithms and supervised skylines offline."
     )
     parser.add_argument("--cache", required=True, type=Path)
+    parser.add_argument(
+        "--context-profile",
+        choices=("prompt-only", "uncertainty-prompt"),
+        default="prompt-only",
+        help=(
+            "Use only prompt-embedding PCA components, or concatenate the full "
+            "manifest-defined uncertainty block before those prompt components"
+        ),
+    )
     parser.add_argument("--prompt-components", type=int, default=20)
     parser.add_argument(
         "--outcome-source",
@@ -114,22 +123,42 @@ def _prompt_context_rounds(
     limit: int | None,
     seed: int = 0,
     outcome_source: str = "cached",
+    context_profile: str = "prompt-only",
 ):
-    """Attach manifest-selected prompt contexts and the requested outcome source."""
+    """Attach manifest-selected contexts and the requested outcome source."""
     if outcome_source not in {"cached", "synthetic"}:
         raise ValueError("outcome_source must be 'cached' or 'synthetic'")
+    if context_profile not in {"prompt-only", "uncertainty-prompt"}:
+        raise ValueError(
+            "context_profile must be 'prompt-only' or 'uncertainty-prompt'"
+        )
     all_rounds = cache.eligible_rounds()
-    all_contexts, block = cache.context_block(
+    all_prompt_contexts, prompt_block = cache.context_block(
         "prompt_embedding_pca", components=prompt_components
     )
-    eligible_contexts = all_contexts[cache.eligible_indices]
+    eligible_prompt_contexts = all_prompt_contexts[cache.eligible_indices]
+    uncertainty_block = None
+    if context_profile == "uncertainty-prompt":
+        all_uncertainty_contexts, uncertainty_block = cache.context_block(
+            "uncertainty"
+        )
+        eligible_uncertainty_contexts = all_uncertainty_contexts[
+            cache.eligible_indices
+        ]
+        eligible_contexts = np.concatenate(
+            (eligible_uncertainty_contexts, eligible_prompt_contexts), axis=1
+        )
+    else:
+        eligible_contexts = eligible_prompt_contexts
     teacher_summary = None
     synthetic_rows: list[dict] = []
     teacher_probabilities = None
     synthetic_outcomes = None
     if outcome_source == "synthetic":
         teacher_probabilities, synthetic_outcomes, teacher_summary = (
-            generate_synthetic_prompt_outcomes(eligible_contexts, seed=seed)
+            generate_synthetic_prompt_outcomes(
+                eligible_prompt_contexts, seed=seed
+            )
         )
     if limit is not None:
         if limit < 1:
@@ -141,7 +170,7 @@ def _prompt_context_rounds(
             synthetic_outcomes = synthetic_outcomes[:limit]
     if not all_rounds:
         raise ValueError("The cache has no eligible weak/strong answer pairs")
-    prompt_rounds = [
+    context_rounds = [
         replace(
             item,
             context=eligible_contexts[index].copy(),
@@ -153,18 +182,40 @@ def _prompt_context_rounds(
         )
         for index, item in enumerate(all_rounds)
     ]
+    context_blocks = (
+        [uncertainty_block, prompt_block]
+        if uncertainty_block is not None
+        else [prompt_block]
+    )
     context_summary = {
+        "profile": context_profile,
         "source": cache.manifest.get("prompt_embedding_definition"),
-        "context_block": block,
+        # Retained for compatibility with existing prompt-only result readers.
+        "context_block": prompt_block,
+        "context_blocks": context_blocks,
+        "context_block_order": [block["name"] for block in context_blocks],
+        "prompt_context_block": prompt_block,
+        "uncertainty_context_block": uncertainty_block,
         "context_dimension": int(eligible_contexts.shape[1]),
         "pca_scope": cache.manifest.get("pca_scope"),
         "fit_scope": "precomputed across all collected prompts",
+        "uncertainty_features_used": uncertainty_block is not None,
+        "hidden_state_features_used": False,
         "outcome_or_answer_features_used": False,
-        "component_selection": "first components in manifest-defined PCA order",
+        "component_selection": {
+            "uncertainty": (
+                "all components in the manifest-defined block"
+                if uncertainty_block is not None
+                else "excluded"
+            ),
+            "prompt_embedding_pca": (
+                "first components in manifest-defined PCA order"
+            ),
+        },
     }
     if teacher_summary is not None:
         teacher_summary["probabilities_stored_in_player_observations"] = False
-        teacher_summary["selected_examples"] = len(prompt_rounds)
+        teacher_summary["selected_examples"] = len(context_rounds)
         teacher_summary["selected_probability_mean"] = float(
             np.mean(teacher_probabilities)
         )
@@ -175,9 +226,9 @@ def _prompt_context_rounds(
                 "teacher_probability": float(teacher_probabilities[index]),
                 "synthetic_outcome": int(synthetic_outcomes[index]),
             }
-            for index, item in enumerate(prompt_rounds)
+            for index, item in enumerate(context_rounds)
         ]
-    return prompt_rounds, context_summary, teacher_summary, synthetic_rows
+    return context_rounds, context_summary, teacher_summary, synthetic_rows
 
 
 def _run_one_player(
@@ -569,6 +620,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             args.limit,
             args.seed,
             args.outcome_source,
+            args.context_profile,
         )
     )
     output = args.output_dir.resolve()

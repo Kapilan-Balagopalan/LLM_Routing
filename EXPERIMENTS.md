@@ -147,6 +147,68 @@ simulate-llm-routing `
   --output-dir prompt-forest-sanity-results
 ```
 
+The 20D, 32D, and 64D prompt-only capacity runs have now been inspected. Their
+supervised validation AUCs were:
+
+| Prompt PCs | Logistic | HGB leaves=3 | HGB leaves=7 | HGB leaves=15 |
+|---:|---:|---:|---:|---:|
+| 20 | 0.5715 | 0.5348 | 0.5501 | 0.5633 |
+| 32 | 0.5777 | 0.5548 | 0.5523 | 0.5653 |
+| 64 | 0.5799 | 0.5452 | 0.5713 | 0.5758 |
+
+The 64D HGB-15 result approached logistic, but did not establish a nonlinear
+advantage: its AUC difference from logistic was -0.0041 with a paired bootstrap
+interval spanning zero. The 64D-versus-32D paired changes also had intervals
+spanning zero. In online routing, CBPSide had the lowest empirical decision loss
+at all ten thresholds for every prompt dimension. The routing audits passed for
+all three studies. Decision: retain 32 prompt PCs for economy and next add the
+more informative uncertainty block, while continuing to exclude hidden states.
+
+### 46D uncertainty-plus-prompt study, 2026-09-04
+
+This study tests whether informative uncertainty features plus prompt-space
+nonlinearity give HGB-based routing policies a more useful context than prompt
+features alone:
+
+- cached schema-v2 weak/strong disagreement remains the true label;
+- all 14 features in the manifest-defined `uncertainty` block are followed by
+  the first 32 components of the manifest-defined `prompt_embedding_pca` block;
+- block offsets are read by name from `manifest.context_blocks`; hidden-state
+  features are excluded;
+- all 5,138 eligible examples are online rounds;
+- ETC routes the first 300 rounds, fits HGB once, and freezes;
+- IGW uses online-refitted HGB, `mu=2`, `gamma=64`, and no forced tastes;
+- CBPSide uses linear logistic regression and no forced tastes;
+- HGB capacities are 3, 7, and 15 maximum leaves, with all other HGB settings
+  fixed as in the prompt-only capacity study;
+- the supervised skyline uses one stratified 4:1 train-validation split;
+- the ten loss points correspond to alpha values evenly spaced from 0.55 to
+  0.30, and random traffic is matched separately to each ETC profile.
+
+Planned PowerShell command; implementation work must not execute the full
+experiment:
+
+```powershell
+simulate-llm-routing `
+  --cache .\llm-routing-cache-full.zip `
+  --context-profile uncertainty-prompt `
+  --prompt-components 32 `
+  --outcome-source cached `
+  --experiment all `
+  --l01-values 1.8182 1.9149 2.0225 2.1429 2.2785 2.4324 2.6087 2.8125 3.0508 3.3333 `
+  --l11 1 `
+  --etc-tastes 300 `
+  --cbpside-tastes 0 `
+  --igw-min-tastes 0 `
+  --igw-mu 2 `
+  --igw-gamma-values 64 `
+  --hgb-max-leaf-nodes 3 7 15 `
+  --random-repeats 100 `
+  --skyline-validation-fraction 0.2 `
+  --seed 0 `
+  --output-dir .\uncertainty-prompt-46-hgb-capacity-results
+```
+
 No numerical conclusion is recorded until the user runs this command and the
 result bundle is inspected.
 

@@ -15,8 +15,9 @@
 - `experiment/residual-diagnostics`: real-data Logistic/HGB/MLP residual work.
 - `experiment/prompt-embedding`: outcome-free semantic prompt augmentation and
   its controlled supervised/residual comparison.
-- `experiment/prompt-routing`: prompt-only real-label routing study, retaining
-  an optional synthetic-label positive control.
+- `experiment/prompt-routing`: prompt-based real-label routing studies,
+  including the uncertainty-plus-prompt hybrid, while retaining an optional
+  synthetic-label positive control.
 - `backup/current-combined`: recovery snapshot made before branch separation.
 
 Do not mix an experiment into another branch. Shared bug fixes should be made

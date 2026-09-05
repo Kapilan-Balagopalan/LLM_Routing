@@ -132,11 +132,18 @@ def test_prompt_context_rounds_use_manifest_block_before_limit():
         records=records,
         arrays={
             "eligible": np.ones(6, dtype=bool),
-            "contexts": np.column_stack(
+            "contexts": np.concatenate(
                 (
-                    np.full((6, 4), 99.0),
+                    np.column_stack(
+                        (
+                            100.0 + np.arange(6),
+                            200.0 + np.arange(6),
+                        )
+                    ),
+                    np.full((6, 2), -999.0),
                     np.arange(24, dtype=np.float64).reshape(6, 4),
-                )
+                ),
+                axis=1,
             ),
         },
     )
@@ -159,7 +166,11 @@ def test_prompt_context_rounds_use_manifest_block_before_limit():
     assert summary["context_block"]["stop"] == 8
     assert summary["outcome_or_answer_features_used"] is False
     assert summary["fit_scope"] == "precomputed across all collected prompts"
-    assert summary["component_selection"] == (
+    assert summary["profile"] == "prompt-only"
+    assert summary["context_block_order"] == ["prompt_embedding_pca"]
+    assert summary["uncertainty_features_used"] is False
+    assert summary["hidden_state_features_used"] is False
+    assert summary["component_selection"]["prompt_embedding_pca"] == (
         "first components in manifest-defined PCA order"
     )
     assert teacher_summary is None
@@ -185,6 +196,45 @@ def test_prompt_context_rounds_use_manifest_block_before_limit():
     assert [round_.routing_outcome for round_ in synthetic_rounds] == [
         row["synthetic_outcome"] for row in synthetic_rows
     ]
+
+    hybrid_rounds, hybrid_summary, _, _ = _prompt_context_rounds(
+        cache,
+        prompt_components=4,
+        limit=3,
+        seed=0,
+        outcome_source="cached",
+        context_profile="uncertainty-prompt",
+    )
+    expected_hybrid = np.concatenate(
+        (cache.arrays["contexts"][:3, 0:2], cache.arrays["contexts"][:3, 4:8]),
+        axis=1,
+    )
+    assert all(round_.context.shape == (6,) for round_ in hybrid_rounds)
+    assert np.array_equal(
+        np.stack([round_.context for round_ in hybrid_rounds]),
+        expected_hybrid,
+    )
+    assert not np.any(expected_hybrid == -999.0)
+    assert hybrid_summary["profile"] == "uncertainty-prompt"
+    assert hybrid_summary["context_dimension"] == 6
+    assert hybrid_summary["context_block_order"] == [
+        "uncertainty",
+        "prompt_embedding_pca",
+    ]
+    assert hybrid_summary["uncertainty_context_block"]["start"] == 0
+    assert hybrid_summary["uncertainty_context_block"]["stop"] == 2
+    assert hybrid_summary["prompt_context_block"]["start"] == 4
+    assert hybrid_summary["prompt_context_block"]["stop"] == 8
+    assert hybrid_summary["uncertainty_features_used"] is True
+    assert hybrid_summary["hidden_state_features_used"] is False
+
+    with pytest.raises(ValueError, match="context_profile"):
+        _prompt_context_rounds(
+            cache,
+            prompt_components=4,
+            limit=3,
+            context_profile="unknown",
+        )
 
 
 def test_compact_context_is_14_uncertainty_plus_32_prompt_dimensions():

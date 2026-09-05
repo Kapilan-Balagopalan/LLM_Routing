@@ -14,7 +14,8 @@ weak- or strong-model generation is repeated.
 ```text
 llm-routing-cache-full.zip
     -> cache.py validates records and arrays
-    -> run.py finds prompt_embedding_pca from manifest context_blocks
+    -> run.py finds requested feature blocks from manifest context_blocks
+    -> run.py selects prompt-only or uncertainty-then-prompt context
     -> run.py selects cached disagreement or the optional synthetic positive control
     -> environment.py emits the current context and weak answer
     -> player.py defines the act-then-update protocol
@@ -55,10 +56,12 @@ The 14 uncertainty features contain choice entropy, normalized choice entropy,
 top probability, top-two margin, one-minus-top probability, next-token
 vocabulary entropy, four option probabilities, and four option log likelihoods.
 
-On `experiment/prompt-routing`, `run.py` obtains the block boundaries by finding
-`prompt_embedding_pca` in `manifest.context_blocks`. The active real-label study
-exposes the first 20 components in PCA order and excludes uncertainty and
-hidden-state blocks.
+On `experiment/prompt-routing`, `run.py` obtains every block boundary by name
+from `manifest.context_blocks`. The active real-label study concatenates the
+complete 14-dimensional `uncertainty` block with the first 32 components of
+`prompt_embedding_pca`, in that order, for a 46-dimensional context. It excludes
+the hidden-state block. The prompt-only profile remains available to reproduce
+earlier 20D, 32D, and 64D studies.
 The PCA was constructed during collection across all prompts without outcomes.
 An optional experiment limit is applied only after block selection.
 
@@ -128,8 +131,9 @@ cross-validated model-comparison functions used by earlier branches.
 
 ### `run.py`
 
-The `simulate-llm-routing` entry point runs online experiments, supervised
-skylines, or both. It writes reproducibility metadata, per-method summaries,
+The `simulate-llm-routing` entry point selects a manifest-defined context
+profile and runs online experiments, supervised skylines, or both. It writes
+reproducibility metadata, per-method summaries,
 optional synthetic outcome metadata, validation predictions, full online
 trajectories, plots, and a ZIP bundle. With no `--limit`, every one of the 5,138
 eligible cache rows is an online round. The supervised skyline remains a
@@ -165,9 +169,10 @@ or environment interfaces.
 - `experiment/prompt-embedding` adds a frozen semantic sidecar, a three-context
   supervised comparison, an incremental prompt-residual test, and a two-stage
   corrected-probability skyline with split-seed stability results.
-- `experiment/prompt-routing` uses 20 prompt PCs and cached disagreement for a
-  separate supervised skyline and full-stream online routing evaluation. It
-  retains the multifeature forest-generated synthetic positive control.
+- `experiment/prompt-routing` supports prompt-only and 14D-uncertainty plus
+  prompt-PCA contexts with cached disagreement for a separate supervised
+  skyline and full-stream online routing evaluation. It retains the
+  multifeature forest-generated synthetic positive control.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather
 than inferring research intent from implementation details alone.

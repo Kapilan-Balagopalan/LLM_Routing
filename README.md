@@ -4,11 +4,11 @@ This repository replays weak-versus-strong LLM routing policies from a collected
 ARC-Easy cache. It is CPU-only: the simulation does not load an LLM, contact
 Hugging Face, require an `HF_TOKEN`, or need a GPU.
 
-The active work on `experiment/prompt-routing` asks whether prompt-embedding
-features support a useful nonlinear routing policy. The real routing target is
-cached weak/strong disagreement. A separate synthetic-label positive control is
-available for implementation sanity checks; it must not be interpreted as real
-ARC routing performance.
+The active work on `experiment/prompt-routing` asks whether combining
+uncertainty features with prompt embeddings supports a useful nonlinear routing
+policy. The real routing target is cached weak/strong disagreement. A separate
+synthetic-label positive control is available for implementation sanity checks;
+it must not be interpreted as real ARC routing performance.
 
 For experiment history and conclusions, read [EXPERIMENTS.md](EXPERIMENTS.md).
 For module boundaries and data flow, read [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -71,31 +71,37 @@ python -m pip install -e ".[test]"
 python -m pytest -q
 ```
 
-## Active 32-component experiment
+## Active 46-dimensional hybrid experiment
 
-The next planned experiment uses the first 32 components of the manifest-defined
-prompt block. It retains the ten loss points, gamma 64, and the 3-, 7-, and
-15-leaf HGB capacity comparison from the completed 20-component study.
+The next planned experiment concatenates the complete manifest-defined
+14-dimensional `uncertainty` block with the first 32 components of the
+manifest-defined `prompt_embedding_pca` block, in that order. The hidden-state
+block remains excluded. It retains the ten loss points, gamma 64, and the 3-,
+7-, and 15-leaf HGB capacity comparison from the prompt-only studies.
 
 ```powershell
 simulate-llm-routing `
   --cache .\llm-routing-cache-full.zip `
+  --context-profile uncertainty-prompt `
   --outcome-source cached `
   --experiment all `
   --prompt-components 32 `
   --igw-gamma-values 64 `
   --hgb-max-leaf-nodes 3 7 15 `
-  --output-dir .\prompt-routing-32-hgb-capacity-results
+  --output-dir .\uncertainty-prompt-46-hgb-capacity-results
 ```
 
-Specifying `--prompt-components 32` is important: the command-line default
-remains 20 so the completed 20-component experiment can still be reproduced.
+Both context arguments are important. The defaults remain `prompt-only` and 20
+prompt components so the completed prompt-only experiments can still be
+reproduced. Block positions are always read from `manifest.json`; the command
+does not assume numeric column offsets.
 
 For a quick installation check, run only the supervised path on a prefix:
 
 ```powershell
 simulate-llm-routing `
   --cache .\llm-routing-cache-full.zip `
+  --context-profile uncertainty-prompt `
   --outcome-source cached `
   --experiment skyline `
   --prompt-components 32 `
@@ -188,6 +194,7 @@ To reproduce the earlier artificial forest-label sanity check:
 ```powershell
 simulate-llm-routing `
   --cache .\llm-routing-cache-full.zip `
+  --context-profile prompt-only `
   --outcome-source synthetic `
   --experiment all `
   --prompt-components 64 `
@@ -206,7 +213,7 @@ gold answer, cached model answer, or real disagreement label. See
 | Branch | Purpose |
 |---|---|
 | `main` | Current shared repository state |
-| `experiment/prompt-routing` | Prompt-only real-label routing and synthetic positive control |
+| `experiment/prompt-routing` | Prompt and uncertainty-plus-prompt real-label routing, plus the synthetic positive control |
 | `experiment/prompt-embedding` | External semantic prompt augmentation and residual correction |
 | `experiment/residual-diagnostics` | Logistic/HGB/MLP residual and specification diagnostics |
 | `backup/current-combined` | Recovery snapshot of the earlier combined workflow |
