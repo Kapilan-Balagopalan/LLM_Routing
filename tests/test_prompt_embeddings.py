@@ -228,6 +228,32 @@ def test_prompt_context_rounds_use_manifest_block_before_limit():
     assert hybrid_summary["uncertainty_features_used"] is True
     assert hybrid_summary["hidden_state_features_used"] is False
 
+    all_feature_rounds, all_feature_summary, _, _ = _prompt_context_rounds(
+        cache,
+        prompt_components=1,
+        limit=3,
+        seed=0,
+        outcome_source="cached",
+        context_profile="all-features",
+    )
+    assert all(round_.context.shape == (8,) for round_ in all_feature_rounds)
+    assert np.array_equal(
+        np.stack([round_.context for round_ in all_feature_rounds]),
+        cache.arrays["contexts"][:3],
+    )
+    assert all_feature_summary["profile"] == "all-features"
+    assert all_feature_summary["context_dimension"] == 8
+    assert all_feature_summary["context_block_order"] == [
+        "uncertainty",
+        "hidden_state_pca",
+        "prompt_embedding_pca",
+    ]
+    assert all_feature_summary["uncertainty_features_used"] is True
+    assert all_feature_summary["hidden_state_features_used"] is True
+    assert all_feature_summary["prompt_context_block"]["selected_components"] == 4
+    assert all_feature_summary["hidden_state_context_block"]["start"] == 2
+    assert all_feature_summary["hidden_state_context_block"]["stop"] == 4
+
     with pytest.raises(ValueError, match="context_profile"):
         _prompt_context_rounds(
             cache,

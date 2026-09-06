@@ -71,41 +71,44 @@ python -m pip install -e ".[test]"
 python -m pytest -q
 ```
 
-## Active 46-dimensional hybrid experiment
+## Active 142-dimensional all-feature experiment
 
-The next planned experiment concatenates the complete manifest-defined
-14-dimensional `uncertainty` block with the first 32 components of the
-manifest-defined `prompt_embedding_pca` block, in that order. The hidden-state
-block remains excluded. It retains the ten loss points, gamma 64, and the 3-,
-7-, and 15-leaf HGB capacity comparison from the prompt-only studies.
+The next experiment uses every complete block in `manifest.context_blocks`, in
+manifest order: 14 uncertainty features, 64 hidden-state PCA components, and 64
+prompt-embedding PCA components. This produces the complete 142-dimensional
+cached context. It retains the ten loss points and gamma 64, and uses only the
+selected 15-leaf HGB model.
 
 ```powershell
 simulate-llm-routing `
   --cache .\llm-routing-cache-full.zip `
-  --context-profile uncertainty-prompt `
+  --context-profile all-features `
   --outcome-source cached `
   --experiment all `
-  --prompt-components 32 `
   --igw-gamma-values 64 `
-  --hgb-max-leaf-nodes 3 7 15 `
-  --output-dir .\uncertainty-prompt-46-hgb-capacity-results
+  --hgb-max-leaf-nodes 15 `
+  --cbpside-matrix-regularization 1 `
+  --cbpside-delta 0.05 `
+  --cbpside-c-max 3 `
+  --cbpside-max-confidence-radius 0.5 `
+  --output-dir .\all-features-142-beta-guardrail-results
 ```
 
-Both context arguments are important. The defaults remain `prompt-only` and 20
-prompt components so the completed prompt-only experiments can still be
-reproduced. Block positions are always read from `manifest.json`; the command
-does not assume numeric column offsets.
+The context-profile argument is important. The defaults remain `prompt-only`
+and 20 prompt components so the completed prompt-only experiments can still be
+reproduced. `all-features` always selects every complete manifest block, so
+`--prompt-components` does not truncate it. Block positions and order are read
+from `manifest.json`; the command does not assume numeric column offsets.
 
 For a quick installation check, run only the supervised path on a prefix:
 
 ```powershell
 simulate-llm-routing `
   --cache .\llm-routing-cache-full.zip `
-  --context-profile uncertainty-prompt `
+  --context-profile all-features `
   --outcome-source cached `
   --experiment skyline `
-  --prompt-components 32 `
-  --hgb-max-leaf-nodes 3 7 15 `
+  --hgb-max-leaf-nodes 15 `
   --limit 500 `
   --output-dir .\smoke-test-results
 ```
@@ -117,15 +120,15 @@ results.
 
 | Policy | Probability model | Exploration and fitting |
 |---|---|---|
-| ETC | HGB with 3, 7, or 15 maximum leaves | Route the first 300 rounds, fit once, then freeze |
-| IGW | Online-refitted HGB with the same capacities | `gamma=64`, `mu=2`, no forced tastes or class bootstrap |
+| ETC | HGB with 15 maximum leaves | Route the first 300 rounds, fit once, then freeze |
+| IGW | Online-refitted 15-leaf HGB | `gamma=64`, `mu=2`, no forced tastes or class bootstrap |
 | CBPSide | Regularized linear logistic regression | No forced tastes or class bootstrap; confidence-based routing |
 | Random | No model | Matched separately to each ETC profile's realized traffic |
 
-Every HGB profile uses 50 boosting iterations, learning rate 0.05, minimum leaf
-size 20, L2 regularization 1.0, and no early stopping. Only
-`max_leaf_nodes = 3, 7, 15` changes. IGW inverse-propensity weights are capped
-at 10. A common base seed is used across loss thresholds and HGB capacities.
+HGB uses 15 maximum leaves, 50 boosting iterations, learning rate 0.05, minimum
+leaf size 20, L2 regularization 1.0, and no early stopping. IGW
+inverse-propensity weights are capped at 10. A common base seed is used across
+loss thresholds.
 
 The loss grid contains ten evenly spaced decision thresholds:
 
@@ -138,26 +141,33 @@ Because `l11=1`, the simulator uses `l01=1/alpha`.
 
 ### CBPSide confidence scaling
 
-The current CBPSide implementation L2-normalizes each context using
-`x / max(1, ||x||_2)`, prepends an intercept, and forms
-`V = I + sum(x x^T)`. Its effective confidence radius is
+CBPSide L2-normalizes each context using `x / max(1, ||x||_2)`, prepends an
+intercept, and forms `V = lambda I + sum(x x^T)`. It uses the Proposition 1
+confidence beta
 
 ```text
-radius = min(0.25 * sqrt(x^T V^-1 x), 0.5)
+beta = (2 k_sigma R_max / c_sigma)
+       * sqrt(x^T V^-1 x)
+       * sqrt((3 + 2 log(1 + 2/lambda))
+              * 2 d log(N)
+              * log(d/delta_t))
+
+radius = min(beta, 0.5)
 ```
 
-The code calculates a theoretical beta expression, but that multiplier is
-currently disabled. Consequently, `delta` and the theoretical logistic-curvature
-factor do not affect routing. Results should therefore be described as using a
-heuristically scaled Mahalanobis confidence radius, not the complete theoretical
-CBPSide confidence bound.
+The fixed settings are `k_sigma=1/4`, `R_max=1`, `lambda=1`, and
+`C_max=3`, with
+`c_sigma=exp(C_max)/(1+exp(C_max))^2`. The dimension `d` includes the
+intercept. The implementation uses `delta_t=min(0.05,0.5/d)` and
+`N=max(2, number of revealed tastes)` to satisfy the dimension guardrail and
+handle startup. No additional beta multiplier is applied.
 
 ## Supervised skyline versus online routing
 
 These are separate evaluations:
 
 - `--experiment skyline` makes one stratified 80/20 train-validation split. It
-  fits logistic and the three HGB capacities on the training 80% and evaluates
+  fits logistic and the 15-leaf HGB on the training 80% and evaluates
   only validation predictions.
 - `--experiment online` sends all 5,138 eligible samples sequentially to ETC,
   IGW, and CBPSide. There is no supervised pretraining subset, and action 0

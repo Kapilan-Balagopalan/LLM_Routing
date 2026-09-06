@@ -15,7 +15,7 @@ weak- or strong-model generation is repeated.
 llm-routing-cache-full.zip
     -> cache.py validates records and arrays
     -> run.py finds requested feature blocks from manifest context_blocks
-    -> run.py selects prompt-only or uncertainty-then-prompt context
+    -> run.py selects prompt-only, uncertainty-prompt, or all-feature context
     -> run.py selects cached disagreement or the optional synthetic positive control
     -> environment.py emits the current context and weak answer
     -> player.py defines the act-then-update protocol
@@ -56,12 +56,12 @@ The 14 uncertainty features contain choice entropy, normalized choice entropy,
 top probability, top-two margin, one-minus-top probability, next-token
 vocabulary entropy, four option probabilities, and four option log likelihoods.
 
-On `experiment/prompt-routing`, `run.py` obtains every block boundary by name
-from `manifest.context_blocks`. The active real-label study concatenates the
-complete 14-dimensional `uncertainty` block with the first 32 components of
-`prompt_embedding_pca`, in that order, for a 46-dimensional context. It excludes
-the hidden-state block. The prompt-only profile remains available to reproduce
-earlier 20D, 32D, and 64D studies.
+On `experiment/prompt-routing`, `run.py` obtains every block boundary and its
+order from `manifest.context_blocks`. The active real-label study selects every
+complete manifest block: 14 uncertainty features, 64 hidden-state PCA features,
+and 64 prompt-embedding PCA features, for a 142-dimensional context. The
+prompt-only and 46D uncertainty-plus-prompt profiles remain available to
+reproduce the smaller-context studies.
 The PCA was constructed during collection across all prompts without outcomes.
 An optional experiment limit is applied only after block selection.
 
@@ -92,14 +92,16 @@ It checks that updates correspond to the pending action and context.
 
 - `HGBETCPlayer`: routes strongly for 300 rounds, fits one histogram gradient
   boosting classifier from those revealed labels, and freezes that estimator.
-  The active capacity study repeats this policy with 3, 7, and 15 maximum
-  leaves per boosting tree while holding every other HGB setting fixed.
+  Future studies use 15 maximum leaves per boosting tree.
 - `LogCBPSideATPlayer`: estimates a regularized linear logistic disagreement
-  model and applies the CBPSide confidence rule without forced tastes.
+  model and applies the Proposition 1 confidence beta without forced tastes.
+  The implementation uses the number of revealed action-1 outcomes for
+  `N_{t-1}`, includes the intercept in `d`, enforces the agreed
+  dimension-dependent delta guardrail, and caps the final radius at 0.5.
 - `IGWPlayer`: estimates disagreement using an online-refitted histogram
   gradient boosting classifier and samples an arm using inverse-gap weighting.
-  The active study uses `mu=2`, fixed `gamma=64`, and the same 3-, 7-, and
-  15-leaf HGB capacity profiles as ETC.
+  The active study uses `mu=2`, fixed `gamma=64`, and the same 15-leaf HGB
+  profile as ETC.
 - `RevealedFeedbackEstimator`: extracts only action-1 observations and applies
   capped inverse-propensity weights when supplied.
 
@@ -124,8 +126,8 @@ and unrevealed synthetic labels are never given to an online player.
 ### `skyline.py`
 
 For the active prompt study, performs one stratified 80/20 split and fits linear
-logistic plus the three exact HGB capacity profiles used by the online nonlinear
-players on the training portion. Classification metrics and threshold skylines
+logistic plus the 15-leaf HGB used by the online nonlinear players on the
+training portion. Classification metrics and threshold skylines
 are evaluated only on validation predictions. The module also retains broader
 cross-validated model-comparison functions used by earlier branches.
 
@@ -169,9 +171,9 @@ or environment interfaces.
 - `experiment/prompt-embedding` adds a frozen semantic sidecar, a three-context
   supervised comparison, an incremental prompt-residual test, and a two-stage
   corrected-probability skyline with split-seed stability results.
-- `experiment/prompt-routing` supports prompt-only and 14D-uncertainty plus
-  prompt-PCA contexts with cached disagreement for a separate supervised
-  skyline and full-stream online routing evaluation. It retains the
+- `experiment/prompt-routing` supports prompt-only, uncertainty-plus-prompt,
+  and complete 142D manifest contexts with cached disagreement for a separate
+  supervised skyline and full-stream online routing evaluation. It retains the
   multifeature forest-generated synthetic positive control.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather

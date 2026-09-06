@@ -47,14 +47,22 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache", required=True, type=Path)
     parser.add_argument(
         "--context-profile",
-        choices=("prompt-only", "uncertainty-prompt"),
+        choices=("prompt-only", "uncertainty-prompt", "all-features"),
         default="prompt-only",
         help=(
-            "Use only prompt-embedding PCA components, or concatenate the full "
-            "manifest-defined uncertainty block before those prompt components"
+            "Use prompt PCA only, uncertainty plus prompt PCA, or every complete "
+            "feature block in manifest order"
         ),
     )
-    parser.add_argument("--prompt-components", type=int, default=20)
+    parser.add_argument(
+        "--prompt-components",
+        type=int,
+        default=20,
+        help=(
+            "Prompt PCA components for prompt-only and uncertainty-prompt; "
+            "all-features always uses the complete prompt block"
+        ),
+    )
     parser.add_argument(
         "--outcome-source",
         choices=("cached", "synthetic"),
@@ -77,6 +85,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cbpside-tastes", type=int, default=0)
     parser.add_argument("--cbpside-bootstrap-per-class", type=int, default=0)
     parser.add_argument("--cbpside-bootstrap-max-tastes", type=int, default=0)
+    parser.add_argument(
+        "--cbpside-matrix-regularization", type=float, default=1.0
+    )
+    parser.add_argument("--cbpside-delta", type=float, default=0.05)
+    parser.add_argument("--cbpside-c-max", type=float, default=3.0)
+    parser.add_argument(
+        "--cbpside-max-confidence-radius", type=float, default=0.5
+    )
     parser.add_argument("--igw-min-tastes", type=int, default=0)
     parser.add_argument("--igw-bootstrap-per-class", type=int, default=0)
     parser.add_argument("--igw-bootstrap-max-tastes", type=int, default=0)
@@ -128,17 +144,40 @@ def _prompt_context_rounds(
     """Attach manifest-selected contexts and the requested outcome source."""
     if outcome_source not in {"cached", "synthetic"}:
         raise ValueError("outcome_source must be 'cached' or 'synthetic'")
-    if context_profile not in {"prompt-only", "uncertainty-prompt"}:
+    if context_profile not in {
+        "prompt-only",
+        "uncertainty-prompt",
+        "all-features",
+    }:
         raise ValueError(
-            "context_profile must be 'prompt-only' or 'uncertainty-prompt'"
+            "context_profile must be 'prompt-only', 'uncertainty-prompt', "
+            "or 'all-features'"
         )
     all_rounds = cache.eligible_rounds()
     all_prompt_contexts, prompt_block = cache.context_block(
-        "prompt_embedding_pca", components=prompt_components
+        "prompt_embedding_pca",
+        components=(None if context_profile == "all-features" else prompt_components),
     )
     eligible_prompt_contexts = all_prompt_contexts[cache.eligible_indices]
     uncertainty_block = None
-    if context_profile == "uncertainty-prompt":
+    hidden_state_block = None
+    if context_profile == "all-features":
+        selected_contexts = []
+        context_blocks = []
+        for block_definition in cache.manifest["context_blocks"]:
+            all_block_contexts, block = cache.context_block(
+                block_definition["name"]
+            )
+            selected_contexts.append(
+                all_block_contexts[cache.eligible_indices]
+            )
+            context_blocks.append(block)
+        eligible_contexts = np.concatenate(selected_contexts, axis=1)
+        blocks_by_name = {block["name"]: block for block in context_blocks}
+        prompt_block = blocks_by_name["prompt_embedding_pca"]
+        uncertainty_block = blocks_by_name.get("uncertainty")
+        hidden_state_block = blocks_by_name.get("hidden_state_pca")
+    elif context_profile == "uncertainty-prompt":
         all_uncertainty_contexts, uncertainty_block = cache.context_block(
             "uncertainty"
         )
@@ -148,8 +187,10 @@ def _prompt_context_rounds(
         eligible_contexts = np.concatenate(
             (eligible_uncertainty_contexts, eligible_prompt_contexts), axis=1
         )
+        context_blocks = [uncertainty_block, prompt_block]
     else:
         eligible_contexts = eligible_prompt_contexts
+        context_blocks = [prompt_block]
     teacher_summary = None
     synthetic_rows: list[dict] = []
     teacher_probabilities = None
@@ -182,25 +223,32 @@ def _prompt_context_rounds(
         )
         for index, item in enumerate(all_rounds)
     ]
-    context_blocks = (
-        [uncertainty_block, prompt_block]
-        if uncertainty_block is not None
-        else [prompt_block]
-    )
     context_summary = {
         "profile": context_profile,
-        "source": cache.manifest.get("prompt_embedding_definition"),
+        "source": (
+            cache.manifest.get("prompt_embedding_definition")
+            if context_profile == "prompt-only"
+            else "manifest-defined concatenated context blocks"
+        ),
         # Retained for compatibility with existing prompt-only result readers.
         "context_block": prompt_block,
         "context_blocks": context_blocks,
         "context_block_order": [block["name"] for block in context_blocks],
         "prompt_context_block": prompt_block,
         "uncertainty_context_block": uncertainty_block,
+        "hidden_state_context_block": hidden_state_block,
         "context_dimension": int(eligible_contexts.shape[1]),
         "pca_scope": cache.manifest.get("pca_scope"),
-        "fit_scope": "precomputed across all collected prompts",
+        "fit_scope": (
+            "precomputed across all collected prompts"
+            if context_profile == "prompt-only"
+            else (
+                "cached features; PCA blocks precomputed across all collected "
+                "prompts"
+            )
+        ),
         "uncertainty_features_used": uncertainty_block is not None,
-        "hidden_state_features_used": False,
+        "hidden_state_features_used": hidden_state_block is not None,
         "outcome_or_answer_features_used": False,
         "component_selection": {
             "uncertainty": (
@@ -208,8 +256,15 @@ def _prompt_context_rounds(
                 if uncertainty_block is not None
                 else "excluded"
             ),
+            "hidden_state_pca": (
+                "all components in the manifest-defined block"
+                if hidden_state_block is not None
+                else "excluded"
+            ),
             "prompt_embedding_pca": (
-                "first components in manifest-defined PCA order"
+                "all components in the manifest-defined block"
+                if context_profile == "all-features"
+                else "first components in manifest-defined PCA order"
             ),
         },
     }
@@ -276,6 +331,18 @@ def _run_one_player(
                 "confidence_radius": getattr(decision, "confidence_radius", None),
                 "theoretical_confidence_radius": getattr(
                     decision, "theoretical_confidence_radius", None
+                ),
+                "confidence_delta_t": getattr(
+                    decision, "confidence_delta_t", None
+                ),
+                "confidence_dimension": getattr(
+                    decision, "confidence_dimension", None
+                ),
+                "confidence_effective_tastes": getattr(
+                    decision, "confidence_effective_tastes", None
+                ),
+                "confidence_radius_capped": getattr(
+                    decision, "confidence_radius_capped", None
                 ),
                 "estimator": getattr(decision, "estimator", "logistic_regression"),
                 "estimator_fitted": getattr(decision, "estimator_fitted", None),
@@ -378,10 +445,12 @@ def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
     rows, trajectories = [], []
     for l01 in args.l01_values:
         base = LogCBPSideATConfig(
+            matrix_regularization=args.cbpside_matrix_regularization,
+            delta=args.cbpside_delta,
             loss_reject_disagreement=l01,
             loss_route_disagreement=args.l11,
-            beta_scale=0.5,
-            max_confidence_radius=0.5,
+            c_max=args.cbpside_c_max,
+            max_confidence_radius=args.cbpside_max_confidence_radius,
             min_tastes=args.etc_tastes,
             use_confidence_bound=False,
         )
@@ -391,7 +460,6 @@ def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
             bootstrap_per_class=args.cbpside_bootstrap_per_class,
             bootstrap_max_tastes=args.cbpside_bootstrap_max_tastes,
             use_confidence_bound=True,
-            beta_scale=base.beta_scale * 0.5,
         )
         cbpside_result, cbpside_path = _run_one_player(
             "CBPSide",
@@ -687,7 +755,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         "purpose": (
             "positive-control sanity check for routing implementations"
             if args.outcome_source == "synthetic"
-            else "prompt-only routing study on cached weak/strong disagreement"
+            else (
+                f"{args.context_profile} routing study on cached "
+                "weak/strong disagreement"
+            )
         ),
         "synthetic_teacher": teacher_summary,
         "loss_grid": [

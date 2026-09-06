@@ -21,7 +21,7 @@ ONLINE_HGB_PROFILE = {
     "early_stopping": False,
 }
 
-DEFAULT_HGB_MAX_LEAF_NODES = (3, 7, 15)
+DEFAULT_HGB_MAX_LEAF_NODES = (15,)
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,6 @@ class LogCBPSideATConfig:
     loss_reject_disagreement: float = 2.0
     loss_route_disagreement: float = 1.0
     c_max: float = 3.0
-    beta_scale: float = 0.05
     max_confidence_radius: float = 0.5
     theta_regularization: float = 1.0
     theta_norm_bound: float | None = None
@@ -52,7 +51,10 @@ class LogCBPSideATDecision:
     confident: bool
     reason: str
     theoretical_confidence_radius: float
-    scaled_confidence_radius: float
+    confidence_delta_t: float
+    confidence_dimension: int
+    confidence_effective_tastes: int
+    confidence_radius_capped: bool
     theta: np.ndarray
     V: np.ndarray
     tasted_count: int
@@ -102,11 +104,12 @@ class LogCBPSideAT:
         V = self._design_matrix(tasted_contexts, model_dim)
         model_x = self.features(x)
         predicted = float(self.sigmoid(model_x @ theta))
-        theoretical = self._confidence_radius(
-            model_x, V, len(tasted_outcomes)
+        theoretical, delta_t, beta_dimension, effective_tastes = (
+            self._confidence_radius(
+                model_x, V, len(tasted_outcomes)
+            )
         )
-        scaled = self.config.beta_scale * theoretical
-        radius = min(scaled, self.config.max_confidence_radius)
+        radius = min(theoretical, self.config.max_confidence_radius)
 
         agreements = tasted_outcomes.count(0)
         disagreements = tasted_outcomes.count(1)
@@ -147,7 +150,10 @@ class LogCBPSideAT:
             confident=confident,
             reason=reason,
             theoretical_confidence_radius=theoretical,
-            scaled_confidence_radius=scaled,
+            confidence_delta_t=delta_t,
+            confidence_dimension=beta_dimension,
+            confidence_effective_tastes=effective_tastes,
+            confidence_radius_capped=theoretical > radius,
             theta=theta,
             V=V,
             tasted_count=len(tasted_outcomes),
@@ -248,25 +254,33 @@ class LogCBPSideAT:
 
     def _confidence_radius(
         self, x: np.ndarray, V: np.ndarray, tasted_count: int
-    ) -> float:
+    ) -> tuple[float, float, int, int]:
+        """Return Proposition 1 beta and its effective guardrail inputs."""
         cfg = self.config
         mahalanobis = float(np.sqrt(max(0.0, x @ np.linalg.solve(V, x))))
-        # The intercept and slope have separate bounds, so their worst-case
-        # absolute logit is the sum of those bounds.
-        max_logit = cfg.c_max + (cfg.theta_norm_bound or cfg.c_max)
-        edge_probability = float(self.sigmoid(max_logit))
+        beta_dimension = int(x.size)
+        delta_t = min(cfg.delta, 0.5 / beta_dimension)
+        effective_tastes = max(2, tasted_count)
+        edge_probability = float(self.sigmoid(cfg.c_max))
         c_sigma = edge_probability * (1.0 - edge_probability)
-        n = max(2, tasted_count)
         beta_squared = (
-            (3.0 + 2.0 * np.log(1.0 + 2.0 / cfg.matrix_regularization))
+            (
+                3.0
+                + 2.0 * np.log1p(2.0 / cfg.matrix_regularization)
+            )
             * 2.0
-            * x.size
-            * np.log(n)
-            * np.log(x.size / cfg.delta)
+            * beta_dimension
+            * np.log(effective_tastes)
+            * np.log(beta_dimension / delta_t)
         )
-        return float(
-            mahalanobis #* np.sqrt(max(0.0, beta_squared)) / (2.0 * c_sigma)
+        k_sigma = 0.25
+        r_max = 1.0
+        beta = float(
+            (2.0 * k_sigma * r_max / c_sigma)
+            * mahalanobis
+            * np.sqrt(max(0.0, beta_squared))
         )
+        return beta, delta_t, beta_dimension, effective_tastes
 
     def _validate_config(self) -> None:
         cfg = self.config
@@ -276,8 +290,8 @@ class LogCBPSideAT:
             raise ValueError("delta must be between 0 and 1")
         if cfg.loss_reject_disagreement < cfg.loss_route_disagreement:
             raise ValueError("loss_reject_disagreement must be >= loss_route_disagreement")
-        if cfg.beta_scale <= 0 or cfg.max_confidence_radius <= 0:
-            raise ValueError("confidence scale and cap must be positive")
+        if cfg.max_confidence_radius <= 0:
+            raise ValueError("confidence cap must be positive")
         if cfg.theta_regularization < 0:
             raise ValueError("theta_regularization must be nonnegative")
         if cfg.min_tastes < 0:

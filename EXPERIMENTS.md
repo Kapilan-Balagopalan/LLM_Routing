@@ -209,6 +209,109 @@ simulate-llm-routing `
   --output-dir .\uncertainty-prompt-46-hgb-capacity-results
 ```
 
+Result: the uncertainty block materially improved every supervised model over
+prompt-only 32D. Logistic AUC increased from 0.5777 to 0.6215; the best HGB AUC
+was 0.6157 with 15 leaves. HGB-15 had slightly lower log loss than logistic
+(0.6549 versus 0.6601), but paired validation-bootstrap intervals for their AUC,
+log-loss, and Brier differences all included zero. Online mean empirical
+decision loss improved for every learned policy. CBPSide remained best at all
+ten thresholds with mean loss 0.8843, ahead of the best IGW profile, seven
+leaves, at 0.9014. The audit found 46 context values on all 359,660 trajectory
+rows, exactly 300 ETC tastes per run, no IGW tastes, and no feedback violations.
+Artifact: `uncertainty-prompt-46-hgb-capacity-results/simulation-results.zip`.
+
+### Complete 142D cached-context study, 2026-09-05
+
+This follow-up adds the full hidden-state PCA block and expands the prompt block
+from 32 to all 64 components. The context profile takes every complete block in
+manifest order: 14 uncertainty, 64 hidden-state PCA, and 64 prompt-embedding
+PCA features. The cached weak/strong disagreement label, all 5,138 online
+rounds, ten loss points, 300 ETC tastes, no IGW/CBPSide tastes, gamma 64, HGB
+capacities 3/7/15, random matching, seed 0, and supervised 4:1 split remain
+unchanged.
+
+```powershell
+simulate-llm-routing `
+  --cache .\llm-routing-cache-full.zip `
+  --context-profile all-features `
+  --outcome-source cached `
+  --experiment all `
+  --l01-values 1.8182 1.9149 2.0225 2.1429 2.2785 2.4324 2.6087 2.8125 3.0508 3.3333 `
+  --l11 1 `
+  --etc-tastes 300 `
+  --cbpside-tastes 0 `
+  --igw-min-tastes 0 `
+  --igw-mu 2 `
+  --igw-gamma-values 64 `
+  --hgb-max-leaf-nodes 3 7 15 `
+  --random-repeats 100 `
+  --skyline-validation-fraction 0.2 `
+  --seed 0 `
+  --output-dir .\all-features-142-hgb-capacity-results
+```
+
+Result: logistic and HGB-15 had nearly identical supervised AUC, 0.6217 and
+0.6206 respectively. HGB-15 had lower log loss (0.6521 versus 0.6670) and Brier
+score (0.2304 versus 0.2351), but paired bootstrap intervals for all three
+differences included zero. CBPSide had the best mean online decision loss,
+0.8906, while IGW-15 had 0.9032. IGW nevertheless had the lowest point loss at
+the four thresholds from alpha 0.3833 through 0.3000. This did not isolate a
+nonlinear advantage: CBPSide's mean routing rate rose from 0.5342 in 46D to
+0.6467 in 142D, predominantly through its heuristic confidence exploration,
+while every IGW profile's mean loss was slightly worse than in 46D. The audit
+found 142 context values on all 359,660 trajectory rows, exactly 300 ETC tastes
+per run, no IGW tastes, and no feedback violations. Artifact:
+`all-features-142-hgb-capacity-results/simulation-results.zip`.
+
+### Future 15-leaf and Proposition 1 beta setting, 2026-09-05
+
+Future routing studies retain the complete 142D manifest context and every
+other setting above, but use only HGB with 15 maximum leaves. CBPSide replaces
+the earlier heuristic Mahalanobis radius with the full Proposition 1 beta:
+
+```text
+beta = (2 k_sigma R_max / c_sigma)
+       * ||x_t||_(V_(t-1)^-1)
+       * sqrt((3 + 2 log(1 + 2/lambda))
+              * 2 d log(N_(t-1))
+              * log(d/delta_t))
+```
+
+The agreed mapping is `k_sigma=1/4`, `R_max=1`, `lambda=1`,
+`C_max=3`, and
+`c_sigma=exp(C_max)/(1+exp(C_max))^2`. The design dimension includes the
+intercept, so the 142D context uses `d=143`.
+`delta_t=min(0.05,0.5/d)`, and
+`N_(t-1)=max(2, number of revealed action-1 outcomes)`. No beta scaling is
+applied. The final confidence radius retains the numerical guardrail
+`min(beta,0.5)`. CBPSide continues to have no forced tastes.
+
+Planned command; implementation work must not execute the experiment:
+
+```powershell
+simulate-llm-routing `
+  --cache .\llm-routing-cache-full.zip `
+  --context-profile all-features `
+  --outcome-source cached `
+  --experiment all `
+  --l01-values 1.8182 1.9149 2.0225 2.1429 2.2785 2.4324 2.6087 2.8125 3.0508 3.3333 `
+  --l11 1 `
+  --etc-tastes 300 `
+  --cbpside-tastes 0 `
+  --cbpside-matrix-regularization 1 `
+  --cbpside-delta 0.05 `
+  --cbpside-c-max 3 `
+  --cbpside-max-confidence-radius 0.5 `
+  --igw-min-tastes 0 `
+  --igw-mu 2 `
+  --igw-gamma-values 64 `
+  --hgb-max-leaf-nodes 15 `
+  --random-repeats 100 `
+  --skyline-validation-fraction 0.2 `
+  --seed 0 `
+  --output-dir .\all-features-142-beta-guardrail-results
+```
+
 No numerical conclusion is recorded until the user runs this command and the
 result bundle is inspected.
 

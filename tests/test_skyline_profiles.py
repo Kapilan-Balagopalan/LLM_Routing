@@ -38,8 +38,6 @@ def test_skyline_stops_at_hgb_350():
 def test_main_skyline_plot_is_limited_to_research_comparison():
     assert SKYLINE_PLOT_MODELS == (
         "Logistic (80/20 holdout)",
-        "HGB leaves=3 (80/20 holdout)",
-        "HGB leaves=7 (80/20 holdout)",
         "HGB leaves=15 (80/20 holdout)",
     )
 
@@ -62,7 +60,59 @@ def test_online_etc_and_igw_use_hgb_configuration():
     assert etc.estimator.estimator_name == "hist_gradient_boosting"
     assert isinstance(igw.estimator, HGBEstimator)
     assert igw.estimator.estimator_name == "hist_gradient_boosting"
-    assert DEFAULT_HGB_MAX_LEAF_NODES == (3, 7, 15)
+    assert DEFAULT_HGB_MAX_LEAF_NODES == (15,)
+
+
+def test_cbpside_beta_matches_proposition_one():
+    config = LogCBPSideATConfig(
+        matrix_regularization=1.0,
+        delta=0.05,
+        c_max=3.0,
+        max_confidence_radius=0.5,
+    )
+    algorithm = LogCBPSideAT(config)
+    x = np.asarray([1.0, 0.6, 0.8])
+    V = np.diag([2.0, 3.0, 4.0])
+
+    beta, delta_t, dimension, effective_tastes = (
+        algorithm._confidence_radius(x, V, tasted_count=10)
+    )
+
+    mahalanobis = np.sqrt(x @ np.linalg.solve(V, x))
+    c_sigma = algorithm.sigmoid(config.c_max) * (
+        1.0 - algorithm.sigmoid(config.c_max)
+    )
+    expected = (
+        (2.0 * 0.25 * 1.0 / c_sigma)
+        * mahalanobis
+        * np.sqrt(
+            (
+                3.0
+                + 2.0 * np.log1p(2.0 / config.matrix_regularization)
+            )
+            * 2.0
+            * x.size
+            * np.log(10)
+            * np.log(x.size / 0.05)
+        )
+    )
+    assert np.isclose(beta, expected)
+    assert delta_t == 0.05
+    assert dimension == 3
+    assert effective_tastes == 10
+
+
+def test_cbpside_beta_uses_dimension_delta_startup_and_final_cap():
+    algorithm = LogCBPSideAT(LogCBPSideATConfig())
+    decision = algorithm.choose_action([], [], [], np.ones(142))
+
+    assert np.isclose(decision.confidence_delta_t, 0.5 / 143.0)
+    assert decision.confidence_delta_t < 1.0 / decision.confidence_dimension
+    assert decision.confidence_dimension == 143
+    assert decision.confidence_effective_tastes == 2
+    assert decision.theoretical_confidence_radius > 0.5
+    assert decision.confidence_radius == 0.5
+    assert decision.confidence_radius_capped is True
 
 
 def test_online_hgb_capacity_is_configurable_without_changing_other_settings():
@@ -151,13 +201,17 @@ def test_online_exploration_defaults():
     assert args.cbpside_tastes == 0
     assert args.cbpside_bootstrap_per_class == 0
     assert args.cbpside_bootstrap_max_tastes == 0
+    assert args.cbpside_matrix_regularization == 1.0
+    assert args.cbpside_delta == 0.05
+    assert args.cbpside_c_max == 3.0
+    assert args.cbpside_max_confidence_radius == 0.5
     assert args.igw_min_tastes == 0
     assert args.igw_bootstrap_per_class == 0
     assert args.igw_bootstrap_max_tastes == 0
     assert args.igw_mu == 2.0
     assert args.igw_gamma_values == list(DEFAULT_IGW_GAMMA_VALUES)
     assert DEFAULT_IGW_GAMMA_VALUES == (64.0,)
-    assert args.hgb_max_leaf_nodes == [3, 7, 15]
+    assert args.hgb_max_leaf_nodes == [15]
     assert len(args.l01_values) == 10
     assert np.allclose(
         [1.0 / value for value in args.l01_values],
@@ -182,6 +236,13 @@ def test_uncertainty_prompt_context_profile_is_explicitly_selectable():
     assert args.prompt_components == 32
 
 
+def test_all_feature_context_profile_is_explicitly_selectable():
+    args = _parser().parse_args(
+        ["--cache", "fixture.zip", "--context-profile", "all-features"]
+    )
+    assert args.context_profile == "all-features"
+
+
 def test_online_sweep_runs_every_hgb_capacity_with_fixed_gamma(monkeypatch):
     args = _parser().parse_args(["--cache", "fixture.zip"])
     args.l01_values = [2.0]
@@ -203,12 +264,6 @@ def test_online_sweep_runs_every_hgb_capacity_with_fixed_gamma(monkeypatch):
     assert trajectories == []
     assert [row["method"] for row in rows] == [
         "CBPSide",
-        "ETC HGB leaves=3",
-        "IGW gamma=64 HGB leaves=3",
-        "Random (matched ETC HGB leaves=3)",
-        "ETC HGB leaves=7",
-        "IGW gamma=64 HGB leaves=7",
-        "Random (matched ETC HGB leaves=7)",
         "ETC HGB leaves=15",
         "IGW gamma=64 HGB leaves=15",
         "Random (matched ETC HGB leaves=15)",
@@ -260,22 +315,16 @@ def test_holdout_prompt_skyline_uses_four_to_one_split():
     assert summary["outcome_source"] == "cached_weak_strong_disagreement"
     assert summary["plot_models"] == [
         "Logistic (80/20 holdout)",
-        "HGB leaves=3 (80/20 holdout)",
-        "HGB leaves=7 (80/20 holdout)",
         "HGB leaves=15 (80/20 holdout)",
     ]
     assert {row["model"] for row in rows} == {
         "Logistic (80/20 holdout)",
-        "HGB leaves=3 (80/20 holdout)",
-        "HGB leaves=7 (80/20 holdout)",
         "HGB leaves=15 (80/20 holdout)",
     }
     assert {
         row["model"] for row in summary["model_comparison"]
     } == {
         "Logistic (80/20 holdout)",
-        "HGB leaves=3 (80/20 holdout)",
-        "HGB leaves=7 (80/20 holdout)",
         "HGB leaves=15 (80/20 holdout)",
     }
 
