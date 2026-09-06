@@ -63,56 +63,31 @@ def test_online_etc_and_igw_use_hgb_configuration():
     assert DEFAULT_HGB_MAX_LEAF_NODES == (15,)
 
 
-def test_cbpside_beta_matches_proposition_one():
+def test_cbpside_uses_scaled_mahalanobis_leverage_radius():
     config = LogCBPSideATConfig(
         matrix_regularization=1.0,
-        delta=0.05,
-        c_max=3.0,
+        beta_scale=0.25,
         max_confidence_radius=0.5,
     )
     algorithm = LogCBPSideAT(config)
     x = np.asarray([1.0, 0.6, 0.8])
     V = np.diag([2.0, 3.0, 4.0])
 
-    beta, delta_t, dimension, effective_tastes = (
-        algorithm._confidence_radius(x, V, tasted_count=10)
+    leverage = algorithm._confidence_radius(x, V, tasted_count=10)
+    expected = np.sqrt(x @ np.linalg.solve(V, x))
+
+    assert np.isclose(leverage, expected)
+
+
+def test_cbpside_empirical_radius_applies_scale_and_final_cap():
+    algorithm = LogCBPSideAT(
+        LogCBPSideATConfig(beta_scale=1.0, max_confidence_radius=0.5)
     )
+    decision = algorithm.choose_action([], [], [], np.ones(138))
 
-    mahalanobis = np.sqrt(x @ np.linalg.solve(V, x))
-    c_sigma = algorithm.sigmoid(config.c_max) * (
-        1.0 - algorithm.sigmoid(config.c_max)
-    )
-    expected = (
-        (2.0 * 0.25 * 1.0 / c_sigma)
-        * mahalanobis
-        * np.sqrt(
-            (
-                3.0
-                + 2.0 * np.log1p(2.0 / config.matrix_regularization)
-            )
-            * 2.0
-            * x.size
-            * np.log(10)
-            * np.log(x.size / 0.05)
-        )
-    )
-    assert np.isclose(beta, expected)
-    assert delta_t == 0.05
-    assert dimension == 3
-    assert effective_tastes == 10
-
-
-def test_cbpside_beta_uses_dimension_delta_startup_and_final_cap():
-    algorithm = LogCBPSideAT(LogCBPSideATConfig())
-    decision = algorithm.choose_action([], [], [], np.ones(142))
-
-    assert np.isclose(decision.confidence_delta_t, 0.5 / 143.0)
-    assert decision.confidence_delta_t < 1.0 / decision.confidence_dimension
-    assert decision.confidence_dimension == 143
-    assert decision.confidence_effective_tastes == 2
-    assert decision.theoretical_confidence_radius > 0.5
+    assert np.isclose(decision.theoretical_confidence_radius, np.sqrt(2.0))
+    assert np.isclose(decision.scaled_confidence_radius, np.sqrt(2.0))
     assert decision.confidence_radius == 0.5
-    assert decision.confidence_radius_capped is True
 
 
 def test_online_hgb_capacity_is_configurable_without_changing_other_settings():
@@ -202,8 +177,7 @@ def test_online_exploration_defaults():
     assert args.cbpside_bootstrap_per_class == 0
     assert args.cbpside_bootstrap_max_tastes == 0
     assert args.cbpside_matrix_regularization == 1.0
-    assert args.cbpside_delta == 0.05
-    assert args.cbpside_c_max == 3.0
+    assert args.cbpside_beta_scale == 0.25
     assert args.cbpside_max_confidence_radius == 0.5
     assert args.igw_min_tastes == 0
     assert args.igw_bootstrap_per_class == 0

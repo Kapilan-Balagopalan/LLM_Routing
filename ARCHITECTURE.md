@@ -12,7 +12,7 @@ weak- or strong-model generation is repeated.
 ## Data flow
 
 ```text
-llm-routing-cache-full.zip
+boolq-routing-cache-full.zip
     -> cache.py validates records and arrays
     -> run.py finds requested feature blocks from manifest context_blocks
     -> run.py selects prompt-only, uncertainty-prompt, or all-feature context
@@ -39,29 +39,30 @@ prompt-feature signal.
 
 ## Cache and context
 
-The v2 cache manifest records:
+The active BoolQ v2 cache manifest records:
 
 - schema: `llm-routing-cache-v2`;
-- dataset: `allenai/ai2_arc`, `ARC-Easy`, train, validation, and test splits;
-- 5,173 collected rows and 5,138 eligible rows;
+- dataset: `google/boolq`, train and validation splits;
+- 12,697 collected rows and 12,648 eligible rows;
 - weak model: `Qwen/Qwen2.5-0.5B-Instruct`;
 - strong model: `meta-llama/Llama-2-13b-chat-hf`;
 - outcome: `1` exactly when extracted weak and strong answers differ;
 - raw concatenated hidden dimension: 4,480;
 - fixed, transductive, outcome-free PCA: 64 components;
-- full saved context: 14 uncertainty features, 64 hidden-state PCA features,
-  and 64 prompt-embedding PCA features, standardized to 142 dimensions.
+- full saved context: 10 uncertainty features, 64 hidden-state PCA features,
+  and 64 prompt-embedding PCA features, standardized to 138 dimensions.
 
-The 14 uncertainty features contain choice entropy, normalized choice entropy,
+The 10 uncertainty features contain choice entropy, normalized choice entropy,
 top probability, top-two margin, one-minus-top probability, next-token
-vocabulary entropy, four option probabilities, and four option log likelihoods.
+vocabulary entropy, two option probabilities, and two option log likelihoods.
 
 On `experiment/prompt-routing`, `run.py` obtains every block boundary and its
-order from `manifest.context_blocks`. The active real-label study selects every
-complete manifest block: 14 uncertainty features, 64 hidden-state PCA features,
-and 64 prompt-embedding PCA features, for a 142-dimensional context. The
-prompt-only and 46D uncertainty-plus-prompt profiles remain available to
-reproduce the smaller-context studies.
+order from `manifest.context_blocks`. The active BoolQ study selects every
+complete manifest block: 10 uncertainty features, 64 hidden-state PCA features,
+and 64 prompt-embedding PCA features, for a 138-dimensional context. The block
+ranges, rather than the manifest's descriptive prose, are authoritative. The
+prompt-only and uncertainty-plus-prompt profiles remain available for earlier
+studies.
 The PCA was constructed during collection across all prompts without outcomes.
 An optional experiment limit is applied only after block selection.
 
@@ -94,10 +95,9 @@ It checks that updates correspond to the pending action and context.
   boosting classifier from those revealed labels, and freezes that estimator.
   Future studies use 15 maximum leaves per boosting tree.
 - `LogCBPSideATPlayer`: estimates a regularized linear logistic disagreement
-  model and applies the Proposition 1 confidence beta without forced tastes.
-  The implementation uses the number of revealed action-1 outcomes for
-  `N_{t-1}`, includes the intercept in `d`, enforces the agreed
-  dimension-dependent delta guardrail, and caps the final radius at 0.5.
+  model and applies the restored empirical Mahalanobis-leverage confidence
+  radius without forced tastes. The active scale is 0.25 and the final radius
+  is capped at 0.5.
 - `IGWPlayer`: estimates disagreement using an online-refitted histogram
   gradient boosting classifier and samples an arm using inverse-gap weighting.
   The active study uses `mu=2`, fixed `gamma=64`, and the same 15-leaf HGB

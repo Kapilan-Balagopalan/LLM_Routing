@@ -312,6 +312,63 @@ simulate-llm-routing `
   --output-dir .\all-features-142-beta-guardrail-results
 ```
 
+Result: the theoretical beta ranged from 563.18 to 2666.34 and the 0.5 radius
+cap was active on all 51,380 CBPSide decisions. CBPSide therefore routed all
+5,138 examples at every loss point. The trajectory audit found no sequencing or
+partial-feedback violations, so this was saturation of the theoretical bound,
+not an online-routing implementation error. Decision: retain commit `ea858e5`
+as the reproducible theoretical-beta experiment, but restore the earlier
+empirical Mahalanobis-leverage radius for subsequent comparisons. Artifact:
+`all-features-142-beta-guardrail-results/simulation-results.zip`.
+
+### BoolQ complete 138D study with restored empirical CBPSide radius, 2026-09-05
+
+The next study changes the benchmark to the schema-v2 BoolQ cache while keeping
+the routing design fixed. `boolq-routing-cache-full.zip` contains 12,697 rows,
+of which 12,648 are eligible. The active context is selected from
+`manifest.context_blocks`: 10 uncertainty features, 64 hidden-state PCA
+features, and 64 prompt-embedding PCA features, for 138 dimensions total. The
+block ranges are authoritative; the cache manifest's free-text
+`context_definition` incorrectly retains the phrase "14 uncertainty".
+
+Cached weak/strong disagreement is the label and the cached strong-model answer
+is the routing reference; BoolQ gold answers are not routing labels. All 12,648
+eligible rows are online rounds. ETC retains 300 forced tastes and then freezes;
+IGW uses online-refitted HGB with `mu=2`, `gamma=64`, and no forced tastes;
+CBPSide uses linear logistic regression with no forced tastes; and random
+traffic is matched to ETC. Only the 15-leaf HGB profile is used. The supervised
+skyline remains a separate stratified 4:1 split with logistic and HGB-15.
+
+CBPSide restores the earlier empirical rule
+`min(0.25 * sqrt(x^T V^-1 x), 0.5)` with `V = I + sum(x x^T)` after context
+normalization and intercept insertion. This is explicitly a heuristic radius,
+not the Proposition 1 beta.
+
+Planned command; implementation work must not execute the experiment:
+
+```powershell
+simulate-llm-routing `
+  --cache .\boolq-routing-cache-full.zip `
+  --context-profile all-features `
+  --outcome-source cached `
+  --experiment all `
+  --l01-values 1.8182 1.9149 2.0225 2.1429 2.2785 2.4324 2.6087 2.8125 3.0508 3.3333 `
+  --l11 1 `
+  --etc-tastes 300 `
+  --cbpside-tastes 0 `
+  --cbpside-matrix-regularization 1 `
+  --cbpside-beta-scale 0.25 `
+  --cbpside-max-confidence-radius 0.5 `
+  --igw-min-tastes 0 `
+  --igw-mu 2 `
+  --igw-gamma-values 64 `
+  --hgb-max-leaf-nodes 15 `
+  --random-repeats 100 `
+  --skyline-validation-fraction 0.2 `
+  --seed 0 `
+  --output-dir .\boolq-all-features-138-results
+```
+
 No numerical conclusion is recorded until the user runs this command and the
 result bundle is inspected.
 

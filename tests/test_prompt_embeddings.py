@@ -263,6 +263,52 @@ def test_prompt_context_rounds_use_manifest_block_before_limit():
         )
 
 
+def test_all_features_uses_boolq_manifest_ranges_without_hardcoded_offsets():
+    records = [
+        {
+            "id": f"boolq-{index}",
+            "prompt": f"BoolQ prompt {index}",
+            "weak_answer": "Yes",
+            "strong_answer": "No" if index else "Yes",
+        }
+        for index in range(2)
+    ]
+    contexts = np.arange(2 * 138, dtype=np.float64).reshape(2, 138)
+    cache = RoutingCache(
+        manifest={
+            "schema_version": "llm-routing-cache-v2",
+            "benchmark": "boolq",
+            "pca_components": 64,
+            "context_blocks": [
+                {"name": "uncertainty", "start": 0, "stop": 10},
+                {"name": "hidden_state_pca", "start": 10, "stop": 74},
+                {"name": "prompt_embedding_pca", "start": 74, "stop": 138},
+            ],
+        },
+        records=records,
+        arrays={"eligible": np.ones(2, dtype=bool), "contexts": contexts},
+    )
+
+    rounds, summary, _, _ = _prompt_context_rounds(
+        cache,
+        prompt_components=1,
+        limit=None,
+        outcome_source="cached",
+        context_profile="all-features",
+    )
+
+    assert np.array_equal(np.stack([item.context for item in rounds]), contexts)
+    assert summary["context_dimension"] == 138
+    assert summary["context_block_order"] == [
+        "uncertainty",
+        "hidden_state_pca",
+        "prompt_embedding_pca",
+    ]
+    assert summary["uncertainty_context_block"]["selected_components"] == 10
+    assert summary["hidden_state_context_block"]["selected_components"] == 64
+    assert summary["prompt_context_block"]["selected_components"] == 64
+
+
 def test_compact_context_is_14_uncertainty_plus_32_prompt_dimensions():
     current = np.zeros((20, 78), dtype=np.float64)
     prompt = np.ones((20, 32), dtype=np.float64)

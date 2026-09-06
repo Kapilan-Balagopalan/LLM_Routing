@@ -88,8 +88,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cbpside-matrix-regularization", type=float, default=1.0
     )
-    parser.add_argument("--cbpside-delta", type=float, default=0.05)
-    parser.add_argument("--cbpside-c-max", type=float, default=3.0)
+    parser.add_argument("--cbpside-beta-scale", type=float, default=0.25)
     parser.add_argument(
         "--cbpside-max-confidence-radius", type=float, default=0.5
     )
@@ -332,18 +331,6 @@ def _run_one_player(
                 "theoretical_confidence_radius": getattr(
                     decision, "theoretical_confidence_radius", None
                 ),
-                "confidence_delta_t": getattr(
-                    decision, "confidence_delta_t", None
-                ),
-                "confidence_dimension": getattr(
-                    decision, "confidence_dimension", None
-                ),
-                "confidence_effective_tastes": getattr(
-                    decision, "confidence_effective_tastes", None
-                ),
-                "confidence_radius_capped": getattr(
-                    decision, "confidence_radius_capped", None
-                ),
                 "estimator": getattr(decision, "estimator", "logistic_regression"),
                 "estimator_fitted": getattr(decision, "estimator_fitted", None),
                 "training_count": getattr(decision, "training_count", None),
@@ -446,10 +433,9 @@ def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
     for l01 in args.l01_values:
         base = LogCBPSideATConfig(
             matrix_regularization=args.cbpside_matrix_regularization,
-            delta=args.cbpside_delta,
             loss_reject_disagreement=l01,
             loss_route_disagreement=args.l11,
-            c_max=args.cbpside_c_max,
+            beta_scale=args.cbpside_beta_scale,
             max_confidence_radius=args.cbpside_max_confidence_radius,
             min_tastes=args.etc_tastes,
             use_confidence_bound=False,
@@ -742,6 +728,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     summary = {
         "cache": str(args.cache.resolve()),
         "cache_schema_version": cache.manifest["schema_version"],
+        "benchmark": cache.manifest.get("benchmark"),
+        "dataset": cache.manifest.get("dataset"),
         "examples": len(rounds),
         "context_dimension": int(rounds[0].context.size),
         "context": context_summary,
@@ -752,6 +740,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             else "cached_strong_model_answer"
         ),
         "arc_gold_answers_used_as_routing_labels": False,
+        "benchmark_gold_answers_used_as_routing_labels": False,
         "purpose": (
             "positive-control sanity check for routing implementations"
             if args.outcome_source == "synthetic"

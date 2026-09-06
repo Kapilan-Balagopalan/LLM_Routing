@@ -1,14 +1,14 @@
 # Offline LLM-routing simulation
 
-This repository replays weak-versus-strong LLM routing policies from a collected
-ARC-Easy cache. It is CPU-only: the simulation does not load an LLM, contact
+This repository replays weak-versus-strong LLM routing policies from collected
+benchmark caches. It is CPU-only: the simulation does not load an LLM, contact
 Hugging Face, require an `HF_TOKEN`, or need a GPU.
 
 The active work on `experiment/prompt-routing` asks whether combining
 uncertainty features with prompt embeddings supports a useful nonlinear routing
 policy. The real routing target is cached weak/strong disagreement. A separate
 synthetic-label positive control is available for implementation sanity checks;
-it must not be interpreted as real ARC routing performance.
+it must not be interpreted as real benchmark routing performance.
 
 For experiment history and conclusions, read [EXPERIMENTS.md](EXPERIMENTS.md).
 For module boundaries and data flow, read [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -20,8 +20,8 @@ For module boundaries and data flow, read [ARCHITECTURE.md](ARCHITECTURE.md).
 - Action `0`: retain the weak answer; the player receives no outcome feedback.
 - Action `1`: route to the strong model; the disagreement outcome is revealed.
 - A **taste** is an action-1 round whose outcome becomes available for learning.
-- Routing accuracy is agreement with the cached strong-model answer. ARC gold
-  answers are not routing labels, online feedback, or the reported accuracy
+- Routing accuracy is agreement with the cached strong-model answer. Benchmark
+  gold answers are not routing labels, online feedback, or the reported accuracy
   reference.
 
 For `l11=1`, the empirical asymmetric decision loss reported in analysis is
@@ -35,22 +35,25 @@ routing rates.
 
 ## Data
 
-`llm-routing-cache-full.zip` is versioned in the repository and is available on
-the active branches. It uses schema v2 and contains 5,173 collected rows, of
-which 5,138 are eligible. Rows are ineligible when either model answer could not
-be parsed.
+The active `boolq-routing-cache-full.zip` uses schema v2 and contains 12,697
+collected rows, of which 12,648 are eligible. Rows are ineligible when either
+model answer could not be parsed. The earlier ARC-Easy cache is retained for
+reproducibility.
 
-The cache stores a 142-dimensional context:
+The BoolQ cache stores a 138-dimensional context:
 
 | Block | Dimensions | Description |
 |---|---:|---|
-| Uncertainty | 14 | Weak-model choice and token-probability summaries |
+| Uncertainty | 10 | Binary-choice and token-probability summaries |
 | Hidden-state PCA | 64 | Whitened PCA of weak-model hidden states |
 | Prompt-embedding PCA | 64 | Whitened PCA of context-free prompt embeddings |
 
-The prompt-routing code finds `prompt_embedding_pca` through
-`manifest.json -> context_blocks`; it never hardcodes column numbers. The PCA
-is fixed, transductive, and outcome-free.
+The prompt-routing code finds all blocks through
+`manifest.json -> context_blocks`; it never hardcodes column numbers. These
+block ranges are authoritative. This matters because the BoolQ manifest's free
+text `context_definition` still says 14 uncertainty features even though its
+block range correctly specifies 10. The PCA is fixed, transductive, and
+outcome-free.
 
 ## Setup
 
@@ -71,27 +74,26 @@ python -m pip install -e ".[test]"
 python -m pytest -q
 ```
 
-## Active 142-dimensional all-feature experiment
+## Active BoolQ 138-dimensional all-feature experiment
 
-The next experiment uses every complete block in `manifest.context_blocks`, in
-manifest order: 14 uncertainty features, 64 hidden-state PCA components, and 64
-prompt-embedding PCA components. This produces the complete 142-dimensional
-cached context. It retains the ten loss points and gamma 64, and uses only the
-selected 15-leaf HGB model.
+The next experiment uses every complete BoolQ block in
+`manifest.context_blocks`, in manifest order: 10 uncertainty features, 64
+hidden-state PCA components, and 64 prompt-embedding PCA components. This
+produces the complete 138-dimensional cached context. It retains the ten loss
+points, gamma 64, and the selected 15-leaf HGB model.
 
 ```powershell
 simulate-llm-routing `
-  --cache .\llm-routing-cache-full.zip `
+  --cache .\boolq-routing-cache-full.zip `
   --context-profile all-features `
   --outcome-source cached `
   --experiment all `
   --igw-gamma-values 64 `
   --hgb-max-leaf-nodes 15 `
   --cbpside-matrix-regularization 1 `
-  --cbpside-delta 0.05 `
-  --cbpside-c-max 3 `
+  --cbpside-beta-scale 0.25 `
   --cbpside-max-confidence-radius 0.5 `
-  --output-dir .\all-features-142-beta-guardrail-results
+  --output-dir .\boolq-all-features-138-results
 ```
 
 The context-profile argument is important. The defaults remain `prompt-only`
@@ -104,7 +106,7 @@ For a quick installation check, run only the supervised path on a prefix:
 
 ```powershell
 simulate-llm-routing `
-  --cache .\llm-routing-cache-full.zip `
+  --cache .\boolq-routing-cache-full.zip `
   --context-profile all-features `
   --outcome-source cached `
   --experiment skyline `
@@ -142,25 +144,19 @@ Because `l11=1`, the simulator uses `l01=1/alpha`.
 ### CBPSide confidence scaling
 
 CBPSide L2-normalizes each context using `x / max(1, ||x||_2)`, prepends an
-intercept, and forms `V = lambda I + sum(x x^T)`. It uses the Proposition 1
-confidence beta
+intercept, and forms `V = lambda I + sum(x x^T)`. The active empirical
+confidence radius restores the implementation used before the Proposition 1
+guardrail experiment:
 
 ```text
-beta = (2 k_sigma R_max / c_sigma)
-       * sqrt(x^T V^-1 x)
-       * sqrt((3 + 2 log(1 + 2/lambda))
-              * 2 d log(N)
-              * log(d/delta_t))
-
-radius = min(beta, 0.5)
+leverage = sqrt(x^T V^-1 x)
+radius = min(0.25 * leverage, 0.5)
 ```
 
-The fixed settings are `k_sigma=1/4`, `R_max=1`, `lambda=1`, and
-`C_max=3`, with
-`c_sigma=exp(C_max)/(1+exp(C_max))^2`. The dimension `d` includes the
-intercept. The implementation uses `delta_t=min(0.05,0.5/d)` and
-`N=max(2, number of revealed tastes)` to satisfy the dimension guardrail and
-handle startup. No additional beta multiplier is applied.
+Here `lambda=1`, the empirical scale is 0.25, and the final radius is capped at
+0.5. This is a heuristic confidence rule, not the full Proposition 1 bound.
+The theoretical-bound variant was retired from the active run because it hit
+the 0.5 cap on every decision in the 142D ARC experiment.
 
 ## Supervised skyline versus online routing
 
@@ -169,7 +165,7 @@ These are separate evaluations:
 - `--experiment skyline` makes one stratified 80/20 train-validation split. It
   fits logistic and the 15-leaf HGB on the training 80% and evaluates
   only validation predictions.
-- `--experiment online` sends all 5,138 eligible samples sequentially to ETC,
+- `--experiment online` sends all 12,648 eligible BoolQ samples sequentially to ETC,
   IGW, and CBPSide. There is no supervised pretraining subset, and action 0
   hides its outcome from the player.
 - `--experiment all` runs both evaluations against the same selected outcome
