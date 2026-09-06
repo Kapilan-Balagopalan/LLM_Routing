@@ -88,9 +88,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cbpside-matrix-regularization", type=float, default=1.0
     )
-    parser.add_argument("--cbpside-beta-scale", type=float, default=0.25)
+    parser.add_argument("--cbpside-beta-scale", type=float, default=1.0)
     parser.add_argument(
-        "--cbpside-max-confidence-radius", type=float, default=0.5
+        "--cbpside-max-confidence-radius", type=float, default=1.0
     )
     parser.add_argument("--igw-min-tastes", type=int, default=0)
     parser.add_argument("--igw-bootstrap-per-class", type=int, default=0)

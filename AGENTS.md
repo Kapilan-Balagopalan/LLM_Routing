@@ -15,9 +15,10 @@
 - `experiment/residual-diagnostics`: real-data Logistic/HGB/MLP residual work.
 - `experiment/prompt-embedding`: outcome-free semantic prompt augmentation and
   its controlled supervised/residual comparison.
-- `experiment/prompt-routing`: prompt-based real-label routing studies,
-  including uncertainty-plus-prompt and complete cached-context profiles,
-  while retaining an optional synthetic-label positive control.
+- `experiment/prompt-routing`: frozen prompt-routing and BoolQ empirical-scale
+  0.25 baseline at commit `a95a3ae`.
+- `experiment/boolq-cbpside-beta1`: BoolQ complete-context follow-up that
+  changes the empirical CBPSide confidence multiplier and final cap to 1.0.
 - `backup/current-combined`: recovery snapshot made before branch separation.
 
 Do not mix an experiment into another branch. Shared bug fixes should be made

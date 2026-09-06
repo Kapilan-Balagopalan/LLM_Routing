@@ -96,8 +96,8 @@ It checks that updates correspond to the pending action and context.
   Future studies use 15 maximum leaves per boosting tree.
 - `LogCBPSideATPlayer`: estimates a regularized linear logistic disagreement
   model and applies the restored empirical Mahalanobis-leverage confidence
-  radius without forced tastes. The active scale is 0.25 and the final radius
-  is capped at 0.5. The player incrementally caches revealed feature rows and
+  radius without forced tastes. The active scale is 1.0 and the final radius
+  is capped at 1.0. The player incrementally caches revealed feature rows and
   `V`; it refits from the same zero initialization only after a new taste.
 - `IGWPlayer`: estimates disagreement using an online-refitted histogram
   gradient boosting classifier and samples an arm using inverse-gap weighting.
@@ -177,6 +177,9 @@ or environment interfaces.
   and complete 142D manifest contexts with cached disagreement for a separate
   supervised skyline and full-stream online routing evaluation. It retains the
   multifeature forest-generated synthetic positive control.
+- `experiment/boolq-cbpside-beta1` preserves that implementation and changes
+  only the empirical CBPSide confidence multiplier from 0.25 to 1.0 for the
+  complete 138D BoolQ context.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather
 than inferring research intent from implementation details alone.

@@ -378,8 +378,10 @@ def test_online_exploration_defaults():
     assert args.cbpside_bootstrap_per_class == 0
     assert args.cbpside_bootstrap_max_tastes == 0
     assert args.cbpside_matrix_regularization == 1.0
-    assert args.cbpside_beta_scale == 0.25
-    assert args.cbpside_max_confidence_radius == 0.5
+    assert args.cbpside_beta_scale == 1.0
+    assert LogCBPSideATConfig().beta_scale == 1.0
+    assert args.cbpside_max_confidence_radius == 1.0
+    assert LogCBPSideATConfig().max_confidence_radius == 1.0
     assert args.igw_min_tastes == 0
     assert args.igw_bootstrap_per_class == 0
     assert args.igw_bootstrap_max_tastes == 0

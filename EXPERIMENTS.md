@@ -12,7 +12,8 @@ decision.
 | `experiment/synthetic-sanity` | Controlled nonlinear `x1*x2` sanity check |
 | `experiment/residual-diagnostics` | Real-data model-specification diagnostics |
 | `experiment/prompt-embedding` | Incremental semantic prompt-feature test |
-| `experiment/prompt-routing` | Prompt-only real-label routing and synthetic positive control |
+| `experiment/prompt-routing` | Frozen BoolQ empirical-scale-0.25 baseline at `a95a3ae` |
+| `experiment/boolq-cbpside-beta1` | BoolQ empirical-scale-1.0 CBPSide follow-up |
 | `backup/current-combined` | Recovery snapshot before branch separation |
 
 Initial combined checkpoint: tag `current-combined-v1`, commit `3905bbf`.
@@ -380,6 +381,60 @@ HGB was already refit only when its taste count changed; it now also avoids the
 previous full-history reconstruction on no-taste rounds. ETC remains frozen
 after its initial 300-taste fit. These are execution optimizations, not changes
 to the information boundary or decision rules.
+
+Result: on the 2,530-example supervised validation split, HGB-15 modestly
+improved over logistic in AUC (0.7414 versus 0.7287), log loss (0.5525 versus
+0.5599), Brier score (0.1883 versus 0.1907), and routing accuracy at 50 percent
+traffic (0.9162 versus 0.9055), while logistic had lower 10-bin ECE. Online,
+IGW had lower empirical decision loss than ETC and matched random at all ten
+thresholds and the lowest loss among all policies at seven thresholds.
+CBPSide routed only one example at the first six thresholds and two at the
+seventh, then jumped to 58.2 percent traffic at alpha 0.3556. Its first revealed
+outcome was an agreement; with scale 0.25 and no forced tastes, the resulting
+confidence radius allowed the linear policy to stop exploring. This is a
+cold-start exploration effect rather than evidence that logistic cannot fit
+the full context. Artifact: `boolq-all-features-138-results/simulation-results.zip`.
+The reproducible scale-0.25 implementation and caching optimization are frozen
+on `experiment/prompt-routing` at commit `a95a3ae`.
+
+### BoolQ CBPSide empirical-scale-1.0 follow-up, 2026-09-06
+
+Branch: `experiment/boolq-cbpside-beta1`
+
+This follow-up changes the empirical CBPSide multiplier from 0.25 to 1.0 and
+the final radius cap from 0.5 to 1.0. The Mahalanobis radius is
+`min(1.0 * sqrt(x^T V^-1 x), 1.0)`. The complete
+138D manifest context, cached weak/strong disagreement outcome, 12,648 online
+rounds, ten loss points, 300 ETC tastes, gamma 64, `mu=2`, 15-leaf HGB,
+no forced IGW/CBPSide tastes, 100 matched-random repeats, seed 0, and the
+separate stratified 4:1 supervised split remain unchanged.
+
+Planned command; the user will execute the experiment:
+
+```powershell
+simulate-llm-routing `
+  --cache .\boolq-routing-cache-full.zip `
+  --context-profile all-features `
+  --outcome-source cached `
+  --experiment all `
+  --l01-values 1.8182 1.9149 2.0225 2.1429 2.2785 2.4324 2.6087 2.8125 3.0508 3.3333 `
+  --l11 1 `
+  --etc-tastes 300 `
+  --cbpside-tastes 0 `
+  --cbpside-matrix-regularization 1 `
+  --cbpside-beta-scale 1 `
+  --cbpside-max-confidence-radius 1 `
+  --igw-min-tastes 0 `
+  --igw-mu 2 `
+  --igw-gamma-values 64 `
+  --hgb-max-leaf-nodes 15 `
+  --random-repeats 100 `
+  --skyline-validation-fraction 0.2 `
+  --seed 0 `
+  --output-dir .\boolq-all-features-138-beta1-results
+```
+
+No numerical conclusion is recorded until the result bundle is inspected.
 
 Positive-control result: on the 1,028-example supervised validation split, HGB
 achieved AUC 0.8210 versus 0.7644 for logistic, with lower log loss (0.5129

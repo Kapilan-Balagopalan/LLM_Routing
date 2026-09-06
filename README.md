@@ -4,7 +4,7 @@ This repository replays weak-versus-strong LLM routing policies from collected
 benchmark caches. It is CPU-only: the simulation does not load an LLM, contact
 Hugging Face, require an `HF_TOKEN`, or need a GPU.
 
-The active work on `experiment/prompt-routing` asks whether combining
+The active work on `experiment/boolq-cbpside-beta1` asks whether combining
 uncertainty features with prompt embeddings supports a useful nonlinear routing
 policy. The real routing target is cached weak/strong disagreement. A separate
 synthetic-label positive control is available for implementation sanity checks;
@@ -57,12 +57,12 @@ outcome-free.
 
 ## Setup
 
-Clone the repository and select the prompt-routing branch:
+Clone the repository and select the BoolQ beta-1 follow-up branch:
 
 ```powershell
 git clone https://github.com/Kapilan-Balagopalan/LLM_Routing.git
 Set-Location LLM_Routing
-git switch experiment/prompt-routing
+git switch experiment/boolq-cbpside-beta1
 ```
 
 Create the environment and install the project:
@@ -91,9 +91,9 @@ simulate-llm-routing `
   --igw-gamma-values 64 `
   --hgb-max-leaf-nodes 15 `
   --cbpside-matrix-regularization 1 `
-  --cbpside-beta-scale 0.25 `
-  --cbpside-max-confidence-radius 0.5 `
-  --output-dir .\boolq-all-features-138-results
+  --cbpside-beta-scale 1 `
+  --cbpside-max-confidence-radius 1 `
+  --output-dir .\boolq-all-features-138-beta1-results
 ```
 
 The context-profile argument is important. The defaults remain `prompt-only`
@@ -156,11 +156,11 @@ guardrail experiment:
 
 ```text
 leverage = sqrt(x^T V^-1 x)
-radius = min(0.25 * leverage, 0.5)
+radius = min(1.0 * leverage, 1.0)
 ```
 
-Here `lambda=1`, the empirical scale is 0.25, and the final radius is capped at
-0.5. This is a heuristic confidence rule, not the full Proposition 1 bound.
+Here `lambda=1`, the empirical scale is 1.0, and the final radius is capped at
+1.0. This is a heuristic confidence rule, not the full Proposition 1 bound.
 The theoretical-bound variant was retired from the active run because it hit
 the 0.5 cap on every decision in the 142D ARC experiment.
 
@@ -225,7 +225,8 @@ gold answer, cached model answer, or real disagreement label. See
 | Branch | Purpose |
 |---|---|
 | `main` | Current shared repository state |
-| `experiment/prompt-routing` | Prompt and uncertainty-plus-prompt real-label routing, plus the synthetic positive control |
+| `experiment/prompt-routing` | Frozen BoolQ all-feature baseline with empirical confidence scale 0.25 |
+| `experiment/boolq-cbpside-beta1` | BoolQ all-feature follow-up with empirical confidence scale 1.0 |
 | `experiment/prompt-embedding` | External semantic prompt augmentation and residual correction |
 | `experiment/residual-diagnostics` | Logistic/HGB/MLP residual and specification diagnostics |
 | `backup/current-combined` | Recovery snapshot of the earlier combined workflow |
