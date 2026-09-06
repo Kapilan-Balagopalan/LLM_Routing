@@ -382,6 +382,11 @@ def _run_one_player(
                 "max_leaf_nodes",
                 None,
             ),
+            "model_refits": getattr(
+                player,
+                "theta_fit_count",
+                getattr(getattr(player, "estimator", None), "fit_count", None),
+            ),
         },
         trajectories,
     )

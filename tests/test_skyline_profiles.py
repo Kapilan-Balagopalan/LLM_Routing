@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 import llm_routing_simulation.run as run_module
 from llm_routing_simulation.algorithm import (
@@ -9,6 +10,7 @@ from llm_routing_simulation.algorithm import (
     IGWPlayer,
     LogCBPSideAT,
     LogCBPSideATConfig,
+    LogCBPSideATPlayer,
 )
 from llm_routing_simulation.skyline import (
     HGB_CAPACITY_PROFILES,
@@ -88,6 +90,205 @@ def test_cbpside_empirical_radius_applies_scale_and_final_cap():
     assert np.isclose(decision.theoretical_confidence_radius, np.sqrt(2.0))
     assert np.isclose(decision.scaled_confidence_radius, np.sqrt(2.0))
     assert decision.confidence_radius == 0.5
+
+
+def test_cbpside_refits_only_after_a_new_taste_and_matches_fresh_fit():
+    config = LogCBPSideATConfig(
+        beta_scale=0.25,
+        loss_reject_disagreement=1.25,
+        min_tastes=2,
+        use_confidence_bound=False,
+    )
+    player = LogCBPSideATPlayer(2, config)
+    round_contexts = [
+        np.asarray([1.0, 0.0]),
+        np.asarray([-1.0, 0.0]),
+        np.asarray([0.0, 0.0]),
+        np.asarray([0.2, 0.0]),
+    ]
+    routed_outcomes = [0, 1, 0, 1]
+    observed_fit_counts = []
+
+    for current, routed_outcome in zip(round_contexts, routed_outcomes):
+        reference = LogCBPSideAT(config).choose_action(
+            player.actions,
+            player.contexts,
+            player.outcomes,
+            current,
+        )
+        cached = player.next_action(current).diagnostics
+        observed_fit_counts.append(player.theta_fit_count)
+
+        assert cached.action == reference.action
+        assert np.array_equal(cached.theta, reference.theta)
+        assert np.array_equal(cached.V, reference.V)
+        assert cached.predicted_disagreement == reference.predicted_disagreement
+        assert cached.confidence_radius == reference.confidence_radius
+
+        revealed = routed_outcome if cached.action == 1 else None
+        player.update(cached.action, current, revealed)
+
+    assert observed_fit_counts == [0, 1, 2, 2]
+    assert player.actions[:2] == [1, 1]
+    assert player.actions[2:] == [0, 0]
+
+
+def test_cbpside_cached_diagnostics_are_read_only_and_failed_update_is_atomic():
+    config = LogCBPSideATConfig(min_tastes=1)
+    player = LogCBPSideATPlayer(2, config)
+    context = np.asarray([0.2, -0.1])
+    decision = player.next_action(context).diagnostics
+
+    with pytest.raises(ValueError):
+        decision.theta[0] = 100.0
+    with pytest.raises(ValueError):
+        decision.V[0, 0] = 100.0
+
+    with pytest.raises(RuntimeError, match="context differs"):
+        player.update(decision.action, np.asarray([0.3, -0.1]), 0)
+    assert player.actions == []
+    assert player._tasted_outcomes == []
+    assert player._fit_dirty is False
+
+    player.update(decision.action, context, 0)
+    assert player._tasted_outcomes == [0]
+
+
+def test_cbpside_cached_player_rejects_empty_context():
+    player = LogCBPSideATPlayer(0, LogCBPSideATConfig())
+    with pytest.raises(ValueError, match="must not be empty"):
+        player.next_action(np.asarray([]))
+
+
+def test_hgb_cache_refits_only_for_new_tastes_and_preserves_freeze():
+    class FakeModel:
+        def fit(self, features, labels, sample_weight):
+            fit_sizes.append(len(labels))
+            self.probability = float(np.average(labels, weights=sample_weight))
+
+        def predict_proba(self, features):
+            return np.asarray(
+                [[1.0 - self.probability, self.probability]] * len(features)
+            )
+
+    fit_sizes: list[int] = []
+    estimator = HGBEstimator(2, seed=3)
+    estimator._new_model = FakeModel
+    actions = [1, 1, 1, 1]
+    contexts = [
+        np.asarray([0.1, 0.0]),
+        np.asarray([0.2, 0.1]),
+        np.asarray([-0.1, 0.2]),
+        np.asarray([-0.2, -0.1]),
+    ]
+    outcomes = [0, 0, 1, 1]
+    propensities = [1.0, 1.0, 1.0, 1.0]
+    current = np.asarray([0.3, -0.2])
+
+    estimator.predict(
+        actions,
+        contexts,
+        outcomes,
+        current,
+        sampling_probabilities=propensities,
+    )
+    fitted_model = estimator.model
+    assert estimator.fit_count == 1
+    assert fit_sizes == [4]
+
+    actions.append(0)
+    contexts.append(np.asarray([0.7, 0.4]))
+    outcomes.append(None)
+    propensities.append(0.4)
+    estimator.predict(
+        actions,
+        contexts,
+        outcomes,
+        current,
+        sampling_probabilities=propensities,
+    )
+    assert estimator.fit_count == 1
+    assert estimator.model is fitted_model
+    assert estimator.history_rows_processed == 5
+
+    actions.append(1)
+    contexts.append(np.asarray([-0.4, 0.5]))
+    outcomes.append(1)
+    propensities.append(0.2)
+    estimator.predict(
+        actions,
+        contexts,
+        outcomes,
+        current,
+        sampling_probabilities=propensities,
+    )
+    assert estimator.fit_count == 2
+    assert fit_sizes == [4, 5]
+    assert estimator.last_max_sample_weight == 5.0
+
+    actions.extend([1, 2])
+    contexts.extend(
+        [np.asarray([0.6, -0.3]), np.asarray([0.8, 0.2])]
+    )
+    outcomes.extend([0, None])
+    propensities.extend([0.5, 0.5])
+    with pytest.raises(ValueError, match="Actions must be binary"):
+        estimator.predict(
+            actions,
+            contexts,
+            outcomes,
+            current,
+            sampling_probabilities=propensities,
+        )
+
+    actions[-1] = 0
+    _, tasted_count, _, _ = estimator.predict(
+        actions,
+        contexts,
+        outcomes,
+        current,
+        sampling_probabilities=propensities,
+    )
+    assert tasted_count == 6
+    assert estimator.fit_count == 3
+    assert fit_sizes == [4, 5, 6]
+    assert estimator.history_rows_processed == len(actions)
+
+    frozen = HGBEstimator(2, seed=4)
+    frozen._new_model = FakeModel
+    frozen_actions = actions[:4]
+    frozen_contexts = contexts[:4]
+    frozen_outcomes = outcomes[:4]
+    frozen.predict(
+        frozen_actions,
+        frozen_contexts,
+        frozen_outcomes,
+        current,
+        freeze_after_fit=True,
+    )
+    frozen_model = frozen.model
+    frozen.predict(
+        list(frozen_actions),
+        [context.copy() for context in frozen_contexts],
+        list(frozen_outcomes),
+        current.copy(),
+        freeze_after_fit=True,
+    )
+    assert frozen.fit_count == 1
+    assert frozen.model is frozen_model
+
+    frozen_actions.append(1)
+    frozen_contexts.append(contexts[-1])
+    frozen_outcomes.append(1)
+    frozen.predict(
+        frozen_actions,
+        frozen_contexts,
+        frozen_outcomes,
+        current,
+        freeze_after_fit=True,
+    )
+    assert frozen.fit_count == 1
+    assert frozen.model is frozen_model
 
 
 def test_online_hgb_capacity_is_configurable_without_changing_other_settings():

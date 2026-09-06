@@ -372,6 +372,15 @@ simulate-llm-routing `
 No numerical conclusion is recorded until the user runs this command and the
 result bundle is inspected.
 
+Implementation optimization: online player state now caches revealed contexts,
+labels, inverse-propensity statistics, and the CBPSide design matrix. CBPSide
+recomputes `theta_hat` only on the first decision following a new taste, using
+the same zero initialization and solver as the reference implementation. IGW's
+HGB was already refit only when its taste count changed; it now also avoids the
+previous full-history reconstruction on no-taste rounds. ETC remains frozen
+after its initial 300-taste fit. These are execution optimizations, not changes
+to the information boundary or decision rules.
+
 Positive-control result: on the 1,028-example supervised validation split, HGB
 achieved AUC 0.8210 versus 0.7644 for logistic, with lower log loss (0.5129
 versus 0.5694) and lower Brier score (0.1688 versus 0.1919). In online routing,

@@ -132,6 +132,12 @@ leaf size 20, L2 regularization 1.0, and no early stopping. IGW
 inverse-propensity weights are capped at 10. A common base seed is used across
 loss thresholds.
 
+The online implementations cache append-only revealed history. CBPSide refits
+its logistic coefficients and updates its design matrix only after a newly
+revealed taste; action-0 rounds reuse the previous fitted state. IGW likewise
+refits HGB only after a new taste, while ETC still fits once after its 300 tastes
+and remains frozen. Predictions are still made sequentially on every context.
+
 The loss grid contains ten evenly spaced decision thresholds:
 
 ```text
@@ -182,7 +188,7 @@ The requested output directory contains:
 | File | Contents |
 |---|---|
 | `summary.json` | Cache identity, feature block, parameters, loss grid, and skyline summary |
-| `online_results.csv/json` | Per-policy routing rate and accuracy at every loss point |
+| `online_results.csv/json` | Per-policy routing rate, accuracy, and model-refit count at every loss point |
 | `online_trajectories.jsonl` | Round-level actions, revealed feedback, predictions, and diagnostics |
 | `supervised_model_comparison.csv/json` | Holdout AUC, log loss, Brier score, ECE, and model settings |
 | `supervised_skyline.csv/json` | Threshold-level supervised routing curves |

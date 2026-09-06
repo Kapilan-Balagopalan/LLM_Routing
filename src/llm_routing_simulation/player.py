@@ -22,6 +22,8 @@ class HistoryBasedPlayer(ABC):
         self.actions: list[int] = []
         self.contexts: list[np.ndarray] = []
         self.outcomes: list[int | None] = []
+        self._revealed_count = 0
+        self._revealed_outcome_counts = [0, 0]
         self._pending_context: np.ndarray | None = None
         self._pending_action: int | None = None
 
@@ -49,6 +51,9 @@ class HistoryBasedPlayer(ABC):
         self.actions.append(action)
         self.contexts.append(x.copy())
         self.outcomes.append(outcome)
+        if outcome is not None:
+            self._revealed_count += 1
+            self._revealed_outcome_counts[outcome] += 1
         self._pending_context = None
         self._pending_action = None
 

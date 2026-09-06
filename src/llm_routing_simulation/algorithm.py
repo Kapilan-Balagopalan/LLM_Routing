@@ -100,6 +100,23 @@ class LogCBPSideAT:
             tasted_contexts, tasted_outcomes, model_dim
         )
         V = self._design_matrix(tasted_contexts, model_dim)
+        return self._decision_from_state(
+            x, tasted_outcomes, theta, V, fit_diagnostics
+        )
+
+    def _decision_from_state(
+        self,
+        current_context: np.ndarray,
+        tasted_outcomes: Sequence[int],
+        theta: np.ndarray,
+        V: np.ndarray,
+        fit_diagnostics: tuple[int, float, float, float],
+        outcome_counts: tuple[int, int] | None = None,
+    ) -> LogCBPSideATDecision:
+        """Apply the CBPSide action rule to an already-fitted history state."""
+        x = np.asarray(current_context, dtype=np.float64).reshape(-1)
+        if x.size == 0:
+            raise ValueError("Current context must not be empty")
         model_x = self.features(x)
         predicted = float(self.sigmoid(model_x @ theta))
         theoretical = self._confidence_radius(
@@ -108,8 +125,11 @@ class LogCBPSideAT:
         scaled = self.config.beta_scale * theoretical
         radius = min(scaled, self.config.max_confidence_radius)
 
-        agreements = tasted_outcomes.count(0)
-        disagreements = tasted_outcomes.count(1)
+        agreements, disagreements = (
+            (tasted_outcomes.count(0), tasted_outcomes.count(1))
+            if outcome_counts is None
+            else outcome_counts
+        )
         bootstrap_complete = (
             self.config.bootstrap_per_class == 0
             or (
@@ -139,6 +159,14 @@ class LogCBPSideAT:
                 else "predicted_disagreement" if action else "confident_agreement"
             )
 
+        # Expose read-only views so diagnostics cannot mutate the cached state.
+        theta.setflags(write=False)
+        V.setflags(write=False)
+        reported_theta = theta.view()
+        reported_theta.setflags(write=False)
+        reported_V = V.view()
+        reported_V.setflags(write=False)
+
         return LogCBPSideATDecision(
             action=action,
             predicted_disagreement=predicted,
@@ -148,8 +176,8 @@ class LogCBPSideAT:
             reason=reason,
             theoretical_confidence_radius=theoretical,
             scaled_confidence_radius=scaled,
-            theta=theta,
-            V=V,
+            theta=reported_theta,
+            V=reported_V,
             tasted_count=len(tasted_outcomes),
             projection_events=fit_diagnostics[0],
             unprojected_theta_norm=fit_diagnostics[1],
@@ -296,6 +324,15 @@ class LogCBPSideATPlayer(HistoryBasedPlayer):
         self.bootstrap_per_class = config.bootstrap_per_class
         self.bootstrap_max_tastes = config.bootstrap_max_tastes
         self.last_decision: LogCBPSideATDecision | None = None
+        model_dim = context_dim + 1
+        self._tasted_contexts: list[np.ndarray] = []
+        self._tasted_outcomes: list[int] = []
+        self._tasted_outcome_counts = [0, 0]
+        self._theta = np.zeros(model_dim, dtype=np.float64)
+        self._V = config.matrix_regularization * np.eye(model_dim)
+        self._fit_diagnostics = (0, 0.0, 0.0, 0.0)
+        self._fit_dirty = False
+        self.theta_fit_count = 0
 
     def next_action(self, context: np.ndarray) -> PlayerDecision:
         if self._pending_action is not None:
@@ -303,13 +340,38 @@ class LogCBPSideATPlayer(HistoryBasedPlayer):
         x = np.asarray(context, dtype=np.float64).reshape(-1)
         if x.size != self.context_dim:
             raise ValueError(f"Expected context dimension {self.context_dim}")
-        decision = self.algorithm.choose_action(
-            self.actions, self.contexts, self.outcomes, x
+        if self._fit_dirty:
+            self._theta, self._fit_diagnostics = self.algorithm._estimate_theta(
+                self._tasted_contexts,
+                self._tasted_outcomes,
+                self.context_dim + 1,
+            )
+            self.theta_fit_count += 1
+            self._fit_dirty = False
+        decision = self.algorithm._decision_from_state(
+            x,
+            self._tasted_outcomes,
+            self._theta,
+            self._V,
+            self._fit_diagnostics,
+            outcome_counts=tuple(self._tasted_outcome_counts),
         )
         self._pending_context = x.copy()
         self._pending_action = decision.action
         self.last_decision = decision
         return PlayerDecision(decision.action, decision)
+
+    def update(
+        self, action: int, context: np.ndarray, outcome: int | None
+    ) -> None:
+        super().update(action, context, outcome)
+        if outcome is not None:
+            model_x = self.algorithm.features(self.contexts[-1])
+            self._tasted_contexts.append(model_x)
+            self._tasted_outcomes.append(outcome)
+            self._tasted_outcome_counts[outcome] += 1
+            self._V = self._V + np.outer(model_x, model_x)
+            self._fit_dirty = True
 
 
 @dataclass(frozen=True)
@@ -344,6 +406,23 @@ class RevealedFeedbackEstimator:
         self.observed_classes = 0
         self.last_max_sample_weight = 1.0
         self.last_effective_sample_size = 0.0
+        self.fit_count = 0
+        self.history_rows_processed = 0
+        self._history_owners: tuple[
+            Sequence[int],
+            Sequence[np.ndarray],
+            Sequence[int | None],
+            Sequence[float] | None,
+            float,
+        ] | None = None
+        self._processed_history_count = 0
+        self._revealed_x: list[np.ndarray] = []
+        self._revealed_y: list[int] = []
+        self._revealed_weights: list[float] = []
+        self._label_counts = [0, 0]
+        self._weight_sum = 0.0
+        self._weight_square_sum = 0.0
+        self._max_weight = 1.0
 
     @property
     def estimator_name(self) -> str:
@@ -367,6 +446,72 @@ class RevealedFeedbackEstimator:
             raise ValueError(f"Expected context dimension {self.context_dim}")
         return row[: self.model_context_dim]
 
+    def _reset_history_cache(self) -> None:
+        self._processed_history_count = 0
+        self._revealed_x = []
+        self._revealed_y = []
+        self._revealed_weights = []
+        self._label_counts = [0, 0]
+        self._weight_sum = 0.0
+        self._weight_square_sum = 0.0
+        self._max_weight = 1.0
+
+    def _sync_revealed_history(
+        self,
+        actions: Sequence[int],
+        contexts: Sequence[np.ndarray],
+        outcomes: Sequence[int | None],
+        sampling_probabilities: Sequence[float] | None,
+        min_sampling_probability: float,
+    ) -> None:
+        """Cache the newly appended history suffix and its revealed feedback."""
+        same_history = (
+            self._history_owners is not None
+            and actions is self._history_owners[0]
+            and contexts is self._history_owners[1]
+            and outcomes is self._history_owners[2]
+            and sampling_probabilities is self._history_owners[3]
+            and min_sampling_probability == self._history_owners[4]
+        )
+        if (
+            not same_history
+            or len(actions) < self._processed_history_count
+        ):
+            self._history_owners = (
+                actions,
+                contexts,
+                outcomes,
+                sampling_probabilities,
+                min_sampling_probability,
+            )
+            self._reset_history_cache()
+
+        for index in range(self._processed_history_count, len(actions)):
+            action = actions[index]
+            outcome = outcomes[index]
+            sampling_probability = (
+                1.0
+                if sampling_probabilities is None
+                else float(sampling_probabilities[index])
+            )
+            if action not in (0, 1) or outcome not in (0, 1, None):
+                raise ValueError("Actions must be binary and outcomes binary or None")
+            if not 0 < sampling_probability <= 1:
+                raise ValueError("Every sampling probability must be in (0, 1]")
+            if action == 1 and outcome is not None:
+                weight = 1.0 / max(
+                    sampling_probability, min_sampling_probability
+                )
+                self._revealed_x.append(self.transform(contexts[index]))
+                self._revealed_y.append(outcome)
+                self._revealed_weights.append(weight)
+                self._label_counts[outcome] += 1
+                self._weight_sum += weight
+                self._weight_square_sum += weight * weight
+                self._max_weight = max(self._max_weight, weight)
+            self.history_rows_processed += 1
+            self._processed_history_count = index + 1
+
     def predict(
         self,
         actions: Sequence[int],
@@ -386,46 +531,28 @@ class RevealedFeedbackEstimator:
         if not 0 < min_sampling_probability <= 1:
             raise ValueError("Minimum sampling probability must be in (0, 1]")
         current = self.transform(current_context)
-        revealed_x: list[np.ndarray] = []
-        revealed_y: list[int] = []
-        revealed_weights: list[float] = []
-        probabilities = (
-            sampling_probabilities
-            if sampling_probabilities is not None
-            else [1.0] * len(actions)
+        self._sync_revealed_history(
+            actions,
+            contexts,
+            outcomes,
+            sampling_probabilities,
+            min_sampling_probability,
         )
-        for action, context, outcome, sampling_probability in zip(
-            actions, contexts, outcomes, probabilities
-        ):
-            if action not in (0, 1) or outcome not in (0, 1, None):
-                raise ValueError("Actions must be binary and outcomes binary or None")
-            if not 0 < sampling_probability <= 1:
-                raise ValueError("Every sampling probability must be in (0, 1]")
-            if action == 1 and outcome is not None:
-                row = self.transform(context)
-                revealed_x.append(row)
-                revealed_y.append(outcome)
-                revealed_weights.append(
-                    1.0 / max(float(sampling_probability), min_sampling_probability)
-                )
-
-        tasted_count = len(revealed_y)
-        classes = len(set(revealed_y))
+        tasted_count = len(self._revealed_y)
+        classes = int(self._label_counts[0] > 0) + int(self._label_counts[1] > 0)
         self.observed_classes = classes
-        if revealed_weights:
-            weights = np.asarray(revealed_weights, dtype=np.float64)
-            self.last_max_sample_weight = float(weights.max())
+        if self._revealed_weights:
+            self.last_max_sample_weight = float(self._max_weight)
             self.last_effective_sample_size = float(
-                weights.sum() ** 2 / np.dot(weights, weights)
+                self._weight_sum**2 / self._weight_square_sum
             )
         else:
-            weights = np.asarray([], dtype=np.float64)
             self.last_max_sample_weight = 1.0
             self.last_effective_sample_size = 0.0
-        class_counts = [revealed_y.count(label) for label in set(revealed_y)]
-        if not allow_fit or classes < 2 or min(class_counts) < 2:
+        positive_class_counts = [count for count in self._label_counts if count]
+        if not allow_fit or classes < 2 or min(positive_class_counts) < 2:
             # Laplace smoothing avoids unjustified probabilities of exactly 0 or 1.
-            probability = (sum(revealed_y) + 1.0) / (tasted_count + 2.0)
+            probability = (self._label_counts[1] + 1.0) / (tasted_count + 2.0)
             self.model = None
             self.last_probability = float(probability)
             return float(probability), tasted_count, False, classes
@@ -436,10 +563,11 @@ class RevealedFeedbackEstimator:
         if should_fit:
             self.model = self._new_model()
             self._fit_model(
-                np.stack(revealed_x),
-                np.asarray(revealed_y),
-                weights,
+                np.stack(self._revealed_x),
+                np.asarray(self._revealed_y),
+                np.asarray(self._revealed_weights, dtype=np.float64),
             )
+            self.fit_count += 1
             self.fitted_count = tasted_count
         probability = float(self.model.predict_proba(current[None, :])[0, 1])
         self.last_probability = probability
@@ -516,9 +644,7 @@ class HGBETCPlayer(HistoryBasedPlayer):
         if self._pending_action is not None:
             raise RuntimeError("Previous action must be updated before acting again")
         x = np.asarray(context, dtype=np.float64).reshape(-1)
-        tasted_before_action = sum(
-            outcome is not None for outcome in self.outcomes
-        )
+        tasted_before_action = self._revealed_count
         predicted, tasted_count, fitted, classes = self.estimator.predict(
             self.actions,
             self.contexts,
@@ -640,11 +766,8 @@ class IGWPlayer(HistoryBasedPlayer):
         x = np.asarray(context, dtype=np.float64).reshape(-1)
         if x.size != self.context_dim:
             raise ValueError(f"Expected context dimension {self.context_dim}")
-        tasted_before_action = sum(
-            outcome is not None for outcome in self.outcomes
-        )
-        agreements = sum(outcome == 0 for outcome in self.outcomes)
-        disagreements = sum(outcome == 1 for outcome in self.outcomes)
+        tasted_before_action = self._revealed_count
+        agreements, disagreements = self._revealed_outcome_counts
         bootstrap_complete = (
             self.bootstrap_per_class == 0
             or (

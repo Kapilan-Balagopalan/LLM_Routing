@@ -97,13 +97,15 @@ It checks that updates correspond to the pending action and context.
 - `LogCBPSideATPlayer`: estimates a regularized linear logistic disagreement
   model and applies the restored empirical Mahalanobis-leverage confidence
   radius without forced tastes. The active scale is 0.25 and the final radius
-  is capped at 0.5.
+  is capped at 0.5. The player incrementally caches revealed feature rows and
+  `V`; it refits from the same zero initialization only after a new taste.
 - `IGWPlayer`: estimates disagreement using an online-refitted histogram
   gradient boosting classifier and samples an arm using inverse-gap weighting.
   The active study uses `mu=2`, fixed `gamma=64`, and the same 15-leaf HGB
   profile as ETC.
 - `RevealedFeedbackEstimator`: extracts only action-1 observations and applies
-  capped inverse-propensity weights when supplied.
+  capped inverse-propensity weights when supplied. It processes only newly
+  appended history rows, so HGB is not refit or rebuilt after action-0 rounds.
 
 CBPSide and IGW have no forced tastes or hidden class bootstrap. Before enough
 revealed observations exist to fit both classes, their estimators return a
