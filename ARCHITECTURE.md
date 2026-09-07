@@ -15,7 +15,7 @@ weak- or strong-model generation is repeated.
 boolq-routing-cache-full.zip
     -> cache.py validates records and arrays
     -> run.py finds requested feature blocks from manifest context_blocks
-    -> run.py selects prompt-only, uncertainty-prompt, or all-feature context
+    -> run.py selects prompt-only, non-prompt, uncertainty-prompt, or all-feature context
     -> run.py selects cached disagreement or the optional synthetic positive control
     -> environment.py emits the current context and weak answer
     -> player.py defines the act-then-update protocol
@@ -57,11 +57,11 @@ top probability, top-two margin, one-minus-top probability, next-token
 vocabulary entropy, two option probabilities, and two option log likelihoods.
 
 On `experiment/prompt-routing`, `run.py` obtains every block boundary and its
-order from `manifest.context_blocks`. The active BoolQ context ablation selects
-the complete 64D prompt-embedding PCA block and excludes uncertainty and hidden
-states. The subsequent matched run selects every complete block: 10 uncertainty
-features, 64 hidden-state PCA features, and 64 prompt-embedding PCA features,
-for a 138-dimensional context. The block ranges, rather than the manifest's
+order from `manifest.context_blocks`. The active BoolQ context ablation excludes
+the prompt block and selects 10 uncertainty plus 64 hidden-state PCA features,
+for 74 dimensions. The complementary prompt-only profile selects the complete
+64D prompt-embedding PCA block. The subsequent matched run selects all three
+blocks for 138 dimensions. The block ranges, rather than the manifest's
 descriptive prose, are authoritative.
 The PCA was constructed during collection across all prompts without outcomes.
 An optional experiment limit is applied only after block selection.
@@ -178,8 +178,8 @@ or environment interfaces.
   supervised skyline and full-stream online routing evaluation. It retains the
   multifeature forest-generated synthetic positive control.
 - `experiment/boolq-cbpside-beta1` preserves that implementation and compares
-  prompt-only 64D with complete 138D BoolQ contexts while holding empirical
-  scale 0.5 and cap 1.0 fixed.
+  prompt-only 64D, non-prompt 74D, and complete 138D BoolQ contexts while
+  holding empirical scale 0.5 and cap 1.0 fixed.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather
 than inferring research intent from implementation details alone.

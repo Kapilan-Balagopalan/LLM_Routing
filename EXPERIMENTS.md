@@ -13,7 +13,7 @@ decision.
 | `experiment/residual-diagnostics` | Real-data model-specification diagnostics |
 | `experiment/prompt-embedding` | Incremental semantic prompt-feature test |
 | `experiment/prompt-routing` | Frozen BoolQ empirical-scale-0.25 baseline at `a95a3ae` |
-| `experiment/boolq-cbpside-beta1` | BoolQ prompt-only 64D then complete 138D study at scale 0.5 |
+| `experiment/boolq-cbpside-beta1` | BoolQ 64D prompt, 74D non-prompt, and 138D complete study at scale 0.5 |
 | `backup/current-combined` | Recovery snapshot before branch separation |
 
 Initial combined checkpoint: tag `current-combined-v1`, commit `3905bbf`.
@@ -544,6 +544,45 @@ simulate-llm-routing `
   --skyline-validation-fraction 0.2 `
   --seed 0 `
   --output-dir .\boolq-prompt-only-64-beta05-matched-results
+```
+
+No numerical conclusion is recorded until the result bundle is inspected.
+
+### BoolQ non-prompt 74D scale-0.5 context ablation, 2026-09-07
+
+Branch: `experiment/boolq-cbpside-beta1`
+
+This complementary context experiment removes the entire manifest-defined
+`prompt_embedding_pca` block. It selects every remaining complete block in
+manifest order: 10 uncertainty features followed by 64 hidden-state PCA
+features, for 74 dimensions. Cached weak/strong disagreement, all 12,648 online
+rounds, the four-decimal loss grid, 300 ETC tastes, no IGW/CBPSide forced tastes,
+gamma 64, `mu=2`, HGB-15, beta scale 0.5, cap 1.0, 100 matched-random repeats,
+the separate stratified 4:1 supervised split, and seed 0 remain unchanged.
+
+Planned command; the user will execute the experiment:
+
+```powershell
+simulate-llm-routing `
+  --cache .\boolq-routing-cache-full.zip `
+  --context-profile non-prompt `
+  --outcome-source cached `
+  --experiment all `
+  --l01-values 1.8182 1.9149 2.0225 2.1429 2.2785 2.4324 2.6087 2.8125 3.0508 3.3333 `
+  --l11 1 `
+  --etc-tastes 300 `
+  --cbpside-tastes 0 `
+  --cbpside-matrix-regularization 1 `
+  --cbpside-beta-scale 0.5 `
+  --cbpside-max-confidence-radius 1 `
+  --igw-min-tastes 0 `
+  --igw-mu 2 `
+  --igw-gamma-values 64 `
+  --hgb-max-leaf-nodes 15 `
+  --random-repeats 100 `
+  --skyline-validation-fraction 0.2 `
+  --seed 0 `
+  --output-dir .\boolq-non-prompt-74-beta05-matched-results
 ```
 
 No numerical conclusion is recorded until the result bundle is inspected.

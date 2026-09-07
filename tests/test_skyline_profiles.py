@@ -371,7 +371,7 @@ def test_cbpside_class_bootstrap_until_balanced_or_capped():
 
 def test_online_exploration_defaults():
     args = _parser().parse_args(["--cache", "fixture.zip"])
-    assert args.context_profile == "prompt-only"
+    assert args.context_profile == "non-prompt"
     assert args.prompt_components == 64
     assert args.outcome_source == "cached"
     assert args.etc_tastes == 300
@@ -434,6 +434,13 @@ def test_all_feature_context_profile_is_explicitly_selectable():
         ["--cache", "fixture.zip", "--context-profile", "all-features"]
     )
     assert args.context_profile == "all-features"
+
+
+def test_non_prompt_context_profile_is_explicitly_selectable():
+    args = _parser().parse_args(
+        ["--cache", "fixture.zip", "--context-profile", "non-prompt"]
+    )
+    assert args.context_profile == "non-prompt"
 
 
 def test_online_sweep_runs_every_hgb_capacity_with_fixed_gamma(monkeypatch):

@@ -254,6 +254,34 @@ def test_prompt_context_rounds_use_manifest_block_before_limit():
     assert all_feature_summary["hidden_state_context_block"]["start"] == 2
     assert all_feature_summary["hidden_state_context_block"]["stop"] == 4
 
+    non_prompt_rounds, non_prompt_summary, _, _ = _prompt_context_rounds(
+        cache,
+        prompt_components=4,
+        limit=3,
+        seed=0,
+        outcome_source="cached",
+        context_profile="non-prompt",
+    )
+    expected_non_prompt = cache.arrays["contexts"][:3, 0:4]
+    assert all(round_.context.shape == (4,) for round_ in non_prompt_rounds)
+    assert np.array_equal(
+        np.stack([round_.context for round_ in non_prompt_rounds]),
+        expected_non_prompt,
+    )
+    assert non_prompt_summary["profile"] == "non-prompt"
+    assert non_prompt_summary["context_dimension"] == 4
+    assert non_prompt_summary["context_block_order"] == [
+        "uncertainty",
+        "hidden_state_pca",
+    ]
+    assert non_prompt_summary["prompt_context_block"] is None
+    assert non_prompt_summary["uncertainty_features_used"] is True
+    assert non_prompt_summary["hidden_state_features_used"] is True
+    assert (
+        non_prompt_summary["component_selection"]["prompt_embedding_pca"]
+        == "excluded"
+    )
+
     with pytest.raises(ValueError, match="context_profile"):
         _prompt_context_rounds(
             cache,
@@ -307,6 +335,53 @@ def test_all_features_uses_boolq_manifest_ranges_without_hardcoded_offsets():
     assert summary["uncertainty_context_block"]["selected_components"] == 10
     assert summary["hidden_state_context_block"]["selected_components"] == 64
     assert summary["prompt_context_block"]["selected_components"] == 64
+
+
+def test_non_prompt_uses_boolq_manifest_ranges_without_hardcoded_offsets():
+    records = [
+        {
+            "id": f"boolq-{index}",
+            "prompt": f"BoolQ prompt {index}",
+            "weak_answer": "Yes",
+            "strong_answer": "No" if index else "Yes",
+        }
+        for index in range(2)
+    ]
+    contexts = np.arange(2 * 138, dtype=np.float64).reshape(2, 138)
+    cache = RoutingCache(
+        manifest={
+            "schema_version": "llm-routing-cache-v2",
+            "benchmark": "boolq",
+            "pca_components": 64,
+            "context_blocks": [
+                {"name": "uncertainty", "start": 0, "stop": 10},
+                {"name": "hidden_state_pca", "start": 10, "stop": 74},
+                {"name": "prompt_embedding_pca", "start": 74, "stop": 138},
+            ],
+        },
+        records=records,
+        arrays={"eligible": np.ones(2, dtype=bool), "contexts": contexts},
+    )
+
+    rounds, summary, _, _ = _prompt_context_rounds(
+        cache,
+        prompt_components=64,
+        limit=None,
+        outcome_source="cached",
+        context_profile="non-prompt",
+    )
+
+    assert np.array_equal(
+        np.stack([item.context for item in rounds]), contexts[:, :74]
+    )
+    assert summary["context_dimension"] == 74
+    assert summary["context_block_order"] == [
+        "uncertainty",
+        "hidden_state_pca",
+    ]
+    assert summary["uncertainty_context_block"]["selected_components"] == 10
+    assert summary["hidden_state_context_block"]["selected_components"] == 64
+    assert summary["prompt_context_block"] is None
 
 
 def test_compact_context_is_14_uncertainty_plus_32_prompt_dimensions():

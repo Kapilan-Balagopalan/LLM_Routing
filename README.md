@@ -4,9 +4,10 @@ This repository replays weak-versus-strong LLM routing policies from collected
 benchmark caches. It is CPU-only: the simulation does not load an LLM, contact
 Hugging Face, require an `HF_TOKEN`, or need a GPU.
 
-The active work on `experiment/boolq-cbpside-beta1` compares the complete 64D
-BoolQ prompt-embedding block before repeating the 138D all-feature study. Both
-use CBPSide scale 0.5 and cap 1.0. The real routing target is cached weak/strong
+The active work on `experiment/boolq-cbpside-beta1` compares the complementary
+BoolQ context blocks: the 64D prompt embedding and the 74D non-prompt context.
+The active run uses only the 10 uncertainty and 64 hidden-state PCA features,
+with CBPSide scale 0.5 and cap 1.0. The real routing target is cached weak/strong
 disagreement. A separate synthetic-label positive control is available for
 implementation sanity checks; it must not be interpreted as real benchmark
 routing performance.
@@ -75,18 +76,17 @@ python -m pip install -e ".[test]"
 python -m pytest -q
 ```
 
-## Active BoolQ 64-dimensional prompt-only experiment
+## Active BoolQ 74-dimensional non-prompt experiment
 
-The next experiment uses only the complete BoolQ `prompt_embedding_pca` block
-located through `manifest.context_blocks`. It excludes uncertainty and hidden
-states, retains all 64 prompt components, and keeps the rounded loss grid,
-gamma 64, beta scale 0.5, cap 1.0, and selected 15-leaf HGB model.
+The next experiment excludes `prompt_embedding_pca` and selects every other
+complete block through `manifest.context_blocks`: 10 uncertainty features and
+64 hidden-state PCA components, for 74 dimensions. It keeps the rounded loss
+grid, gamma 64, beta scale 0.5, cap 1.0, and selected 15-leaf HGB model.
 
 ```powershell
 simulate-llm-routing `
   --cache .\boolq-routing-cache-full.zip `
-  --context-profile prompt-only `
-  --prompt-components 64 `
+  --context-profile non-prompt `
   --outcome-source cached `
   --experiment all `
   --l01-values 1.8182 1.9149 2.0225 2.1429 2.2785 2.4324 2.6087 2.8125 3.0508 3.3333 `
@@ -95,23 +95,22 @@ simulate-llm-routing `
   --cbpside-matrix-regularization 1 `
   --cbpside-beta-scale 0.5 `
   --cbpside-max-confidence-radius 1 `
-  --output-dir .\boolq-prompt-only-64-beta05-matched-results
+  --output-dir .\boolq-non-prompt-74-beta05-matched-results
 ```
 
-The active defaults are `prompt-only`, all 64 prompt components, and the same
-four-decimal loss values used in the earlier BoolQ runs. Earlier 20D and 32D
-studies remain reproducible with explicit `--prompt-components`. The subsequent
-matched 138D run uses `--context-profile all-features`, which always selects
-every complete manifest block and ignores prompt-component truncation. Block
-positions and order are read from `manifest.json`; no column offsets are
-hardcoded.
+The active default is `non-prompt`, and the default loss values are the same
+four-decimal values used in the earlier BoolQ runs. Prompt-only studies remain
+available with `--context-profile prompt-only`; their component count defaults
+to 64 and can be changed explicitly. The subsequent matched 138D run uses
+`--context-profile all-features`. Block positions and order are always read from
+`manifest.json`; no column offsets are hardcoded.
 
 For a quick installation check, run only the supervised path on a prefix:
 
 ```powershell
 simulate-llm-routing `
   --cache .\boolq-routing-cache-full.zip `
-  --context-profile all-features `
+  --context-profile non-prompt `
   --outcome-source cached `
   --experiment skyline `
   --hgb-max-leaf-nodes 15 `
@@ -232,7 +231,7 @@ gold answer, cached model answer, or real disagreement label. See
 |---|---|
 | `main` | Current shared repository state |
 | `experiment/prompt-routing` | Frozen BoolQ all-feature baseline with empirical confidence scale 0.25 |
-| `experiment/boolq-cbpside-beta1` | BoolQ prompt-only 64D then all-feature 138D comparison at scale 0.5 |
+| `experiment/boolq-cbpside-beta1` | BoolQ prompt-only 64D, non-prompt 74D, and all-feature 138D comparison at scale 0.5 |
 | `experiment/prompt-embedding` | External semantic prompt augmentation and residual correction |
 | `experiment/residual-diagnostics` | Logistic/HGB/MLP residual and specification diagnostics |
 | `backup/current-combined` | Recovery snapshot of the earlier combined workflow |

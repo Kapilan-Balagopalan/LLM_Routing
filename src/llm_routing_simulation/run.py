@@ -58,11 +58,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache", required=True, type=Path)
     parser.add_argument(
         "--context-profile",
-        choices=("prompt-only", "uncertainty-prompt", "all-features"),
-        default="prompt-only",
+        choices=(
+            "prompt-only",
+            "uncertainty-prompt",
+            "non-prompt",
+            "all-features",
+        ),
+        default="non-prompt",
         help=(
-            "Use prompt PCA only, uncertainty plus prompt PCA, or every complete "
-            "feature block in manifest order"
+            "Use prompt PCA only, uncertainty plus prompt PCA, every complete "
+            "non-prompt block, or every complete feature block in manifest order"
         ),
     )
     parser.add_argument(
@@ -157,11 +162,12 @@ def _prompt_context_rounds(
     if context_profile not in {
         "prompt-only",
         "uncertainty-prompt",
+        "non-prompt",
         "all-features",
     }:
         raise ValueError(
             "context_profile must be 'prompt-only', 'uncertainty-prompt', "
-            "or 'all-features'"
+            "'non-prompt', or 'all-features'"
         )
     all_rounds = cache.eligible_rounds()
     all_prompt_contexts, prompt_block = cache.context_block(
@@ -171,10 +177,15 @@ def _prompt_context_rounds(
     eligible_prompt_contexts = all_prompt_contexts[cache.eligible_indices]
     uncertainty_block = None
     hidden_state_block = None
-    if context_profile == "all-features":
+    if context_profile in {"all-features", "non-prompt"}:
         selected_contexts = []
         context_blocks = []
         for block_definition in cache.manifest["context_blocks"]:
+            if (
+                context_profile == "non-prompt"
+                and block_definition["name"] == "prompt_embedding_pca"
+            ):
+                continue
             all_block_contexts, block = cache.context_block(
                 block_definition["name"]
             )
@@ -182,9 +193,11 @@ def _prompt_context_rounds(
                 all_block_contexts[cache.eligible_indices]
             )
             context_blocks.append(block)
+        if not selected_contexts:
+            raise ValueError("The cache has no complete non-prompt context blocks")
         eligible_contexts = np.concatenate(selected_contexts, axis=1)
         blocks_by_name = {block["name"]: block for block in context_blocks}
-        prompt_block = blocks_by_name["prompt_embedding_pca"]
+        prompt_block = blocks_by_name.get("prompt_embedding_pca")
         uncertainty_block = blocks_by_name.get("uncertainty")
         hidden_state_block = blocks_by_name.get("hidden_state_pca")
     elif context_profile == "uncertainty-prompt":
@@ -272,9 +285,13 @@ def _prompt_context_rounds(
                 else "excluded"
             ),
             "prompt_embedding_pca": (
-                "all components in the manifest-defined block"
-                if context_profile == "all-features"
-                else "first components in manifest-defined PCA order"
+                "excluded"
+                if prompt_block is None
+                else (
+                    "all components in the manifest-defined block"
+                    if context_profile == "all-features"
+                    else "first components in manifest-defined PCA order"
+                )
             ),
         },
     }
