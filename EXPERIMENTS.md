@@ -13,7 +13,7 @@ decision.
 | `experiment/residual-diagnostics` | Real-data model-specification diagnostics |
 | `experiment/prompt-embedding` | Incremental semantic prompt-feature test |
 | `experiment/prompt-routing` | Frozen BoolQ empirical-scale-0.25 baseline at `a95a3ae` |
-| `experiment/boolq-cbpside-beta1` | BoolQ empirical-scale-1.0 CBPSide follow-up |
+| `experiment/boolq-cbpside-beta1` | BoolQ prompt-only 64D then complete 138D study at scale 0.5 |
 | `backup/current-combined` | Recovery snapshot before branch separation |
 
 Initial combined checkpoint: tag `current-combined-v1`, commit `3905bbf`.
@@ -434,7 +434,19 @@ simulate-llm-routing `
   --output-dir .\boolq-all-features-138-beta1-results
 ```
 
-No numerical conclusion is recorded until the result bundle is inspected.
+Result: the scale-1.0 run removed the cold-start collapse but overcorrected.
+CBPSide routed 38.0 percent of examples at alpha 0.55 and 99.79 percent at
+alpha 0.30. Its mean empirical decision loss across the ten thresholds was
+0.8510, compared with 0.7366 for IGW and 0.7703 for ETC; IGW had the lowest
+loss at every threshold. ETC, IGW, random, and both supervised skyline models
+were numerically identical to the scale-0.25 baseline. The radius reached the
+1.0 cap on only about 0.15 percent of CBPSide rounds, indicating that the
+fourfold scale increase, rather than persistent cap saturation, drove the
+excess routing. Artifact:
+`boolq-all-features-138-beta1-results/simulation-results.zip`.
+
+Decision: retain this run as the upper-scale diagnostic and test the
+intermediate empirical scale 0.5 while keeping the cap at 1.0.
 
 Positive-control result: on the 1,028-example supervised validation split, HGB
 achieved AUC 0.8210 versus 0.7644 for logistic, with lower log loss (0.5129
@@ -445,6 +457,96 @@ setting. An audit confirmed exactly 300 forced ETC tastes, no forced IGW tastes,
 and no partial-feedback violations. This supports the implementation sanity
 check without making a claim about real ARC routing signal. Artifact:
 `prompt-forest-sanity-results/simulation-results.zip`. Commit: `79f7a84`.
+
+### BoolQ CBPSide empirical-scale-0.5 follow-up, 2026-09-06
+
+Branch: `experiment/boolq-cbpside-beta1`
+
+This follow-up changes only the active empirical CBPSide multiplier from 1.0
+to 0.5. The final radius cap remains 1.0, producing
+`min(0.5 * sqrt(x^T V^-1 x), 1.0)`. The complete 138D manifest context, cached
+weak/strong disagreement outcome, 12,648 online rounds, ten loss points, 300
+ETC tastes, gamma 64, `mu=2`, 15-leaf HGB, no forced IGW/CBPSide tastes, 100
+matched-random repeats, seed 0, and separate stratified 4:1 supervised split
+remain unchanged.
+
+Planned command; the user will execute the experiment:
+
+```powershell
+simulate-llm-routing `
+  --cache .\boolq-routing-cache-full.zip `
+  --context-profile all-features `
+  --outcome-source cached `
+  --experiment all `
+  --l01-values 1.8182 1.9149 2.0225 2.1429 2.2785 2.4324 2.6087 2.8125 3.0508 3.3333 `
+  --l11 1 `
+  --etc-tastes 300 `
+  --cbpside-tastes 0 `
+  --cbpside-matrix-regularization 1 `
+  --cbpside-beta-scale 0.5 `
+  --cbpside-max-confidence-radius 1 `
+  --igw-min-tastes 0 `
+  --igw-mu 2 `
+  --igw-gamma-values 64 `
+  --hgb-max-leaf-nodes 15 `
+  --random-repeats 100 `
+  --skyline-validation-fraction 0.2 `
+  --seed 0 `
+  --output-dir .\boolq-all-features-138-beta05-results
+```
+
+Observed result: this run accidentally used the exact reciprocal defaults
+rather than the earlier four-decimal loss values. CBPSide routed smoothly from
+12.4 to 94.2 percent, had the lowest decision loss at the three highest alpha
+values, and had mean loss 0.7692. IGW had the lowest loss at the remaining seven
+thresholds and mean loss 0.7359. The cap of 1.0 was never active. ETC traffic,
+random traffic, and the supervised skyline matched the earlier studies, but
+IGW's stochastic path diverged because its propensities used the slightly
+different thresholds. Artifact:
+`boolq-all-features-138-beta05-results/simulation-results.zip`.
+
+Decision: retain this informative run, restore the four-decimal loss values as
+code defaults, run a prompt-only 64D context ablation first, and then repeat the
+138D scale-0.5 run with the exactly matched grid.
+
+### BoolQ prompt-only 64D scale-0.5 context ablation, 2026-09-07
+
+Branch: `experiment/boolq-cbpside-beta1`
+
+This experiment selects only the complete manifest-defined 64D
+`prompt_embedding_pca` block. It excludes all 10 uncertainty and all 64
+hidden-state PCA features. Cached weak/strong disagreement, all 12,648 online
+rounds, the four-decimal loss grid, 300 ETC tastes, no IGW/CBPSide forced tastes,
+gamma 64, `mu=2`, HGB-15, beta scale 0.5, cap 1.0, 100 matched-random repeats,
+the separate stratified 4:1 supervised split, and seed 0 remain unchanged.
+
+Run this context ablation before the matched 138D repetition:
+
+```powershell
+simulate-llm-routing `
+  --cache .\boolq-routing-cache-full.zip `
+  --context-profile prompt-only `
+  --prompt-components 64 `
+  --outcome-source cached `
+  --experiment all `
+  --l01-values 1.8182 1.9149 2.0225 2.1429 2.2785 2.4324 2.6087 2.8125 3.0508 3.3333 `
+  --l11 1 `
+  --etc-tastes 300 `
+  --cbpside-tastes 0 `
+  --cbpside-matrix-regularization 1 `
+  --cbpside-beta-scale 0.5 `
+  --cbpside-max-confidence-radius 1 `
+  --igw-min-tastes 0 `
+  --igw-mu 2 `
+  --igw-gamma-values 64 `
+  --hgb-max-leaf-nodes 15 `
+  --random-repeats 100 `
+  --skyline-validation-fraction 0.2 `
+  --seed 0 `
+  --output-dir .\boolq-prompt-only-64-beta05-matched-results
+```
+
+No numerical conclusion is recorded until the result bundle is inspected.
 
 ### Prompt-only 20D real-label fine-grid study, 2026-09-03
 

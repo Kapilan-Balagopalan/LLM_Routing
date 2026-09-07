@@ -24,6 +24,7 @@ from llm_routing_simulation.skyline import (
 from llm_routing_simulation.run import (
     DEFAULT_ALPHA_VALUES,
     DEFAULT_IGW_GAMMA_VALUES,
+    DEFAULT_L01_VALUES,
     SKYLINE_PLOT_MODELS,
     _parser,
 )
@@ -371,15 +372,15 @@ def test_cbpside_class_bootstrap_until_balanced_or_capped():
 def test_online_exploration_defaults():
     args = _parser().parse_args(["--cache", "fixture.zip"])
     assert args.context_profile == "prompt-only"
-    assert args.prompt_components == 20
+    assert args.prompt_components == 64
     assert args.outcome_source == "cached"
     assert args.etc_tastes == 300
     assert args.cbpside_tastes == 0
     assert args.cbpside_bootstrap_per_class == 0
     assert args.cbpside_bootstrap_max_tastes == 0
     assert args.cbpside_matrix_regularization == 1.0
-    assert args.cbpside_beta_scale == 1.0
-    assert LogCBPSideATConfig().beta_scale == 1.0
+    assert args.cbpside_beta_scale == 0.5
+    assert LogCBPSideATConfig().beta_scale == 0.5
     assert args.cbpside_max_confidence_radius == 1.0
     assert LogCBPSideATConfig().max_confidence_radius == 1.0
     assert args.igw_min_tastes == 0
@@ -390,9 +391,24 @@ def test_online_exploration_defaults():
     assert DEFAULT_IGW_GAMMA_VALUES == (64.0,)
     assert args.hgb_max_leaf_nodes == [15]
     assert len(args.l01_values) == 10
+    assert args.l01_values == list(DEFAULT_L01_VALUES)
+    assert DEFAULT_L01_VALUES == (
+        1.8182,
+        1.9149,
+        2.0225,
+        2.1429,
+        2.2785,
+        2.4324,
+        2.6087,
+        2.8125,
+        3.0508,
+        3.3333,
+    )
     assert np.allclose(
         [1.0 / value for value in args.l01_values],
         DEFAULT_ALPHA_VALUES,
+        rtol=0.0,
+        atol=1e-5,
     )
     assert np.allclose(DEFAULT_ALPHA_VALUES, np.linspace(0.55, 0.30, 10))
     assert args.skyline_validation_fraction == 0.2

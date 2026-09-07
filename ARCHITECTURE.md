@@ -57,12 +57,12 @@ top probability, top-two margin, one-minus-top probability, next-token
 vocabulary entropy, two option probabilities, and two option log likelihoods.
 
 On `experiment/prompt-routing`, `run.py` obtains every block boundary and its
-order from `manifest.context_blocks`. The active BoolQ study selects every
-complete manifest block: 10 uncertainty features, 64 hidden-state PCA features,
-and 64 prompt-embedding PCA features, for a 138-dimensional context. The block
-ranges, rather than the manifest's descriptive prose, are authoritative. The
-prompt-only and uncertainty-plus-prompt profiles remain available for earlier
-studies.
+order from `manifest.context_blocks`. The active BoolQ context ablation selects
+the complete 64D prompt-embedding PCA block and excludes uncertainty and hidden
+states. The subsequent matched run selects every complete block: 10 uncertainty
+features, 64 hidden-state PCA features, and 64 prompt-embedding PCA features,
+for a 138-dimensional context. The block ranges, rather than the manifest's
+descriptive prose, are authoritative.
 The PCA was constructed during collection across all prompts without outcomes.
 An optional experiment limit is applied only after block selection.
 
@@ -96,7 +96,7 @@ It checks that updates correspond to the pending action and context.
   Future studies use 15 maximum leaves per boosting tree.
 - `LogCBPSideATPlayer`: estimates a regularized linear logistic disagreement
   model and applies the restored empirical Mahalanobis-leverage confidence
-  radius without forced tastes. The active scale is 1.0 and the final radius
+  radius without forced tastes. The active scale is 0.5 and the final radius
   is capped at 1.0. The player incrementally caches revealed feature rows and
   `V`; it refits from the same zero initialization only after a new taste.
 - `IGWPlayer`: estimates disagreement using an online-refitted histogram
@@ -139,8 +139,8 @@ The `simulate-llm-routing` entry point selects a manifest-defined context
 profile and runs online experiments, supervised skylines, or both. It writes
 reproducibility metadata, per-method summaries,
 optional synthetic outcome metadata, validation predictions, full online
-trajectories, plots, and a ZIP bundle. With no `--limit`, every one of the 5,138
-eligible cache rows is an online round. The supervised skyline remains a
+trajectories, plots, and a ZIP bundle. With no `--limit`, all 12,648 eligible
+BoolQ cache rows are online rounds. The supervised skyline remains a
 separate 4:1 train-validation task over the same selected outcome source.
 
 ### `prompt_embeddings.py`
@@ -177,9 +177,9 @@ or environment interfaces.
   and complete 142D manifest contexts with cached disagreement for a separate
   supervised skyline and full-stream online routing evaluation. It retains the
   multifeature forest-generated synthetic positive control.
-- `experiment/boolq-cbpside-beta1` preserves that implementation and changes
-  only the empirical CBPSide confidence multiplier from 0.25 to 1.0 for the
-  complete 138D BoolQ context.
+- `experiment/boolq-cbpside-beta1` preserves that implementation and compares
+  prompt-only 64D with complete 138D BoolQ contexts while holding empirical
+  scale 0.5 and cap 1.0 fixed.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather
 than inferring research intent from implementation details alone.

@@ -31,7 +31,7 @@ class LogCBPSideATConfig:
     loss_reject_disagreement: float = 2.0
     loss_route_disagreement: float = 1.0
     c_max: float = 3.0
-    beta_scale: float = 1.0
+    beta_scale: float = 0.5
     max_confidence_radius: float = 1.0
     theta_regularization: float = 1.0
     theta_norm_bound: float | None = None

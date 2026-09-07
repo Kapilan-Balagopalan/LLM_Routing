@@ -17,8 +17,8 @@
   its controlled supervised/residual comparison.
 - `experiment/prompt-routing`: frozen prompt-routing and BoolQ empirical-scale
   0.25 baseline at commit `a95a3ae`.
-- `experiment/boolq-cbpside-beta1`: BoolQ complete-context follow-up that
-  changes the empirical CBPSide confidence multiplier and final cap to 1.0.
+- `experiment/boolq-cbpside-beta1`: BoolQ confidence-scale and context
+  follow-up; the active study uses prompt-only 64D, scale 0.5, and cap 1.0.
 - `backup/current-combined`: recovery snapshot made before branch separation.
 
 Do not mix an experiment into another branch. Shared bug fixes should be made

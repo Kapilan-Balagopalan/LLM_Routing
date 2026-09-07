@@ -36,7 +36,18 @@ SKYLINE_PLOT_MODELS = (
 )
 
 DEFAULT_ALPHA_VALUES = tuple(np.linspace(0.55, 0.30, 10))
-DEFAULT_L01_VALUES = tuple(1.0 / alpha for alpha in DEFAULT_ALPHA_VALUES)
+DEFAULT_L01_VALUES = (
+    1.8182,
+    1.9149,
+    2.0225,
+    2.1429,
+    2.2785,
+    2.4324,
+    2.6087,
+    2.8125,
+    3.0508,
+    3.3333,
+)
 DEFAULT_IGW_GAMMA_VALUES = (64.0,)
 
 
@@ -57,7 +68,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prompt-components",
         type=int,
-        default=20,
+        default=64,
         help=(
             "Prompt PCA components for prompt-only and uncertainty-prompt; "
             "all-features always uses the complete prompt block"
@@ -88,7 +99,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cbpside-matrix-regularization", type=float, default=1.0
     )
-    parser.add_argument("--cbpside-beta-scale", type=float, default=1.0)
+    parser.add_argument("--cbpside-beta-scale", type=float, default=0.5)
     parser.add_argument(
         "--cbpside-max-confidence-radius", type=float, default=1.0
     )
