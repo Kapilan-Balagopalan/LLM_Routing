@@ -48,9 +48,6 @@ DEFAULT_L01_VALUES = (
     3.0508,
     3.3333,
 )
-DEFAULT_IGW_GAMMA_VALUES = (64.0,)
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Replay online routing algorithms and supervised skylines offline."
@@ -97,16 +94,21 @@ def _parser() -> argparse.ArgumentParser:
         "--l01-values", type=float, nargs="+", default=list(DEFAULT_L01_VALUES)
     )
     parser.add_argument("--l11", type=float, default=1.0)
-    parser.add_argument("--etc-tastes", type=int, default=300)
+    parser.add_argument(
+        "--etc-tastes",
+        type=int,
+        default=None,
+        help="ETC forced tastes; default is ceil(n^(2/3)) for the online horizon",
+    )
     parser.add_argument("--cbpside-tastes", type=int, default=0)
     parser.add_argument("--cbpside-bootstrap-per-class", type=int, default=0)
     parser.add_argument("--cbpside-bootstrap-max-tastes", type=int, default=0)
     parser.add_argument(
         "--cbpside-matrix-regularization", type=float, default=1.0
     )
-    parser.add_argument("--cbpside-beta-scale", type=float, default=0.5)
+    parser.add_argument("--cbpside-beta-scale", type=float, default=0.25)
     parser.add_argument(
-        "--cbpside-max-confidence-radius", type=float, default=1.0
+        "--cbpside-max-confidence-radius", type=float, default=0.5
     )
     parser.add_argument("--igw-min-tastes", type=int, default=0)
     parser.add_argument("--igw-bootstrap-per-class", type=int, default=0)
@@ -115,7 +117,8 @@ def _parser() -> argparse.ArgumentParser:
         "--igw-gamma-values",
         type=float,
         nargs="+",
-        default=list(DEFAULT_IGW_GAMMA_VALUES),
+        default=None,
+        help="IGW gamma values; default is sqrt(n) for the online horizon",
     )
     parser.add_argument(
         "--hgb-max-leaf-nodes",
@@ -130,6 +133,27 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--skyline-validation-fraction", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=0)
     return parser
+
+
+def _resolve_online_parameters(args, total_samples: int) -> dict[str, Any]:
+    """Resolve sample-size-dependent online defaults while preserving overrides."""
+    if total_samples <= 0:
+        raise ValueError("The online horizon must be positive")
+
+    etc_is_derived = args.etc_tastes is None
+    gamma_is_derived = args.igw_gamma_values is None
+    if etc_is_derived:
+        args.etc_tastes = int(np.ceil(total_samples ** (2.0 / 3.0)))
+    if gamma_is_derived:
+        args.igw_gamma_values = [float(np.sqrt(total_samples))]
+
+    return {
+        "total_samples": total_samples,
+        "etc_tastes": args.etc_tastes,
+        "etc_tastes_source": "ceil(n^(2/3))" if etc_is_derived else "command_line",
+        "igw_gamma_values": list(args.igw_gamma_values),
+        "igw_gamma_source": "sqrt(n)" if gamma_is_derived else "command_line",
+    }
 
 
 def _jsonable(value: Any) -> Any:
@@ -313,6 +337,26 @@ def _prompt_context_rounds(
     return context_rounds, context_summary, teacher_summary, synthetic_rows
 
 
+def _realized_cost_metrics(
+    *,
+    l01: float,
+    l11: float,
+    routing_rate: float,
+    accuracy: float,
+    examples: int,
+) -> dict[str, float]:
+    """Return realized costs from strong routes and unrouted disagreements."""
+    routed_to_strong = examples * routing_rate
+    unrouted_disagreements = examples * (1.0 - accuracy)
+    total_cost = l11 * routed_to_strong + l01 * unrouted_disagreements
+    return {
+        "routed_to_strong": float(routed_to_strong),
+        "unrouted_disagreements": float(unrouted_disagreements),
+        "realized_cost_per_example": float(total_cost / examples),
+        "realized_total_cost": float(total_cost),
+    }
+
+
 def _run_one_player(
     method: str,
     player,
@@ -378,46 +422,51 @@ def _run_one_player(
         if transition.t % progress_every == 0 or transition.t == len(rounds):
             print(f"[{progress_label}] {transition.t}/{len(rounds)}", flush=True)
 
-    return (
-        {
-            "method": method,
-            "l01": config.loss_reject_disagreement,
-            "l11": config.loss_route_disagreement,
-            "alpha": 1.0
-            / (
-                1.0
-                + config.loss_reject_disagreement
-                - config.loss_route_disagreement
-            ),
-            "routing_rate": routed / len(rounds),
-            "accuracy": correct / len(rounds),
-            "metric": metric,
-            "examples": len(rounds),
-            "min_tastes": getattr(player, "min_tastes", config.min_tastes),
-            "bootstrap_per_class": getattr(player, "bootstrap_per_class", None),
-            "bootstrap_max_tastes": getattr(
-                player, "bootstrap_max_tastes", None
-            ),
-            "probability_estimator": getattr(
-                getattr(player, "estimator", None),
-                "estimator_name",
-                "logistic_regression",
-            ),
-            "igw_gamma": getattr(player, "fixed_gamma", None),
-            "igw_mu": getattr(player, "mu", None),
-            "hgb_max_leaf_nodes": getattr(
-                getattr(player, "estimator", None),
-                "max_leaf_nodes",
-                None,
-            ),
-            "model_refits": getattr(
-                player,
-                "theta_fit_count",
-                getattr(getattr(player, "estimator", None), "fit_count", None),
-            ),
-        },
-        trajectories,
+    result = {
+        "method": method,
+        "l01": config.loss_reject_disagreement,
+        "l11": config.loss_route_disagreement,
+        "alpha": 1.0
+        / (
+            1.0
+            + config.loss_reject_disagreement
+            - config.loss_route_disagreement
+        ),
+        "routing_rate": routed / len(rounds),
+        "accuracy": correct / len(rounds),
+        "metric": metric,
+        "examples": len(rounds),
+        "min_tastes": getattr(player, "min_tastes", config.min_tastes),
+        "bootstrap_per_class": getattr(player, "bootstrap_per_class", None),
+        "bootstrap_max_tastes": getattr(player, "bootstrap_max_tastes", None),
+        "probability_estimator": getattr(
+            getattr(player, "estimator", None),
+            "estimator_name",
+            "logistic_regression",
+        ),
+        "igw_gamma": getattr(player, "fixed_gamma", None),
+        "igw_mu": getattr(player, "mu", None),
+        "hgb_max_leaf_nodes": getattr(
+            getattr(player, "estimator", None),
+            "max_leaf_nodes",
+            None,
+        ),
+        "model_refits": getattr(
+            player,
+            "theta_fit_count",
+            getattr(getattr(player, "estimator", None), "fit_count", None),
+        ),
+    }
+    result.update(
+        _realized_cost_metrics(
+            l01=result["l01"],
+            l11=result["l11"],
+            routing_rate=result["routing_rate"],
+            accuracy=result["accuracy"],
+            examples=result["examples"],
+        )
     )
+    return result, trajectories
 
 
 def _random_matched(
@@ -439,7 +488,7 @@ def _random_matched(
         routed = rng.random(len(rounds)) < target_rate
         rates.append(float(np.mean(routed)))
         accuracies.append(float(np.mean(routed | ~outcomes)))
-    return {
+    result = {
         "method": f"Random (matched ETC HGB leaves={hgb_max_leaf_nodes})",
         "l01": l01,
         "l11": l11,
@@ -452,10 +501,21 @@ def _random_matched(
         "random_repeats": repeats,
         "hgb_max_leaf_nodes": hgb_max_leaf_nodes,
     }
+    result.update(
+        _realized_cost_metrics(
+            l01=result["l01"],
+            l11=result["l11"],
+            routing_rate=result["routing_rate"],
+            accuracy=result["accuracy"],
+            examples=result["examples"],
+        )
+    )
+    return result
 
 
 def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
     """Run HGB ETC/IGW, linear-logistic CBPSide, and matched random."""
+    _resolve_online_parameters(args, len(rounds))
     context_dim = int(rounds[0].context.size)
     metric = (
         "synthetic_routing_accuracy"
@@ -663,6 +723,87 @@ def _plot(
     plt.close(figure)
 
 
+def _plot_online_routing_accuracy(
+    output: Path,
+    online_rows: list[dict],
+    outcome_source: str,
+) -> None:
+    """Plot the original online strong-route versus accuracy comparison."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axis = plt.subplots(figsize=(9, 6), constrained_layout=True)
+    methods = list(dict.fromkeys(row["method"] for row in online_rows))
+    for method in methods:
+        selected = [row for row in online_rows if row["method"] == method]
+        selected.sort(key=lambda row: row["routing_rate"])
+        axis.plot(
+            [row["routing_rate"] for row in selected],
+            [row["accuracy"] for row in selected],
+            marker="o",
+            label=method,
+        )
+    axis.set_xlim(0, 1)
+    axis.set_ylim(0, 1)
+    axis.set_xlabel(
+        "Action-1 routing rate"
+        if outcome_source == "synthetic"
+        else "Strong-model routing rate"
+    )
+    axis.set_ylabel(
+        "Synthetic routing accuracy"
+        if outcome_source == "synthetic"
+        else "Agreement with cached strong-model reference"
+    )
+    axis.set_title("Online routing rate versus accuracy")
+    axis.grid(alpha=0.25)
+    axis.legend(fontsize=8)
+    figure.savefig(output, dpi=180)
+    plt.close(figure)
+
+
+def _plot_online_cost_vs_alpha(output: Path, online_rows: list[dict]) -> None:
+    """Plot every online policy's realized total cost against alpha."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axis = plt.subplots(figsize=(9, 6))
+    methods = list(dict.fromkeys(row["method"] for row in online_rows))
+    for method in methods:
+        selected = [row for row in online_rows if row["method"] == method]
+        selected.sort(key=lambda row: row["alpha"])
+        axis.plot(
+            [row["alpha"] for row in selected],
+            [row["realized_total_cost"] for row in selected],
+            marker="o",
+            label=method,
+        )
+
+    alpha_ticks = sorted({float(row["alpha"]) for row in online_rows})
+    axis.set_xticks(alpha_ticks, [f"{value:.4f}" for value in alpha_ticks])
+    axis.set_xlabel(r"Decision threshold $\alpha$")
+    examples = int(online_rows[0]["examples"])
+    axis.set_ylabel(f"Realized total cost over {examples:,} online samples")
+    axis.set_title("Online realized total cost versus decision threshold")
+    axis.grid(alpha=0.25)
+    axis.legend(fontsize=8)
+
+    l11_values = {float(row["l11"]) for row in online_rows}
+    relation = (
+        r"$\alpha = 1/\ell_{01}$ (because $\ell_{11}=1$)"
+        if l11_values == {1.0}
+        else r"$\alpha = 1/(1+\ell_{01}-\ell_{11})$"
+    )
+    figure.text(0.5, 0.02, relation, ha="center")
+    figure.tight_layout(rect=(0.0, 0.06, 1.0, 1.0))
+    figure.savefig(output, dpi=180)
+    plt.close(figure)
+
+
 def _bundle(output_dir: Path) -> Path:
     destination = output_dir / "simulation-results.zip"
     with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -678,7 +819,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise SystemExit("Every l01 must be greater than or equal to l11")
     if args.random_repeats < 1:
         raise SystemExit("Random repeats must be positive")
-    if any(value <= 0.0 for value in args.igw_gamma_values):
+    if args.igw_gamma_values is not None and any(
+        value <= 0.0 for value in args.igw_gamma_values
+    ):
         raise SystemExit("Every IGW gamma value must be positive")
     if any(value < 2 for value in args.hgb_max_leaf_nodes):
         raise SystemExit("Every HGB max_leaf_nodes value must be at least two")
@@ -688,8 +831,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise SystemExit(
             "Skyline validation fraction must be strictly between zero and one"
         )
+    if args.etc_tastes is not None and args.etc_tastes < 0:
+        raise SystemExit("Taste and bootstrap settings must be nonnegative")
     if min(
-        args.etc_tastes,
         args.cbpside_tastes,
         args.cbpside_bootstrap_per_class,
         args.cbpside_bootstrap_max_tastes,
@@ -710,6 +854,15 @@ def main(argv: Iterable[str] | None = None) -> int:
             args.context_profile,
         )
     )
+    online_parameter_resolution: dict[str, Any] | None = None
+    if args.experiment in {"all", "online"}:
+        online_parameter_resolution = _resolve_online_parameters(args, len(rounds))
+        print(
+            "Online parameters: "
+            f"n={len(rounds)}, ETC tastes={args.etc_tastes}, "
+            f"IGW gamma={args.igw_gamma_values[0]:.12g}.",
+            flush=True,
+        )
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     if synthetic_rows:
@@ -791,6 +944,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             for value in args.l01_values
         ],
         "experiment": args.experiment,
+        "online_parameter_resolution": online_parameter_resolution,
         "parameters": vars(args)
         | {"cache": str(args.cache), "output_dir": str(args.output_dir)},
         "skyline": skyline_summary,
@@ -804,6 +958,16 @@ def main(argv: Iterable[str] | None = None) -> int:
         skyline_rows,
         args.outcome_source,
     )
+    if online_rows:
+        _plot_online_routing_accuracy(
+            output / "online_routing_accuracy.png",
+            online_rows,
+            args.outcome_source,
+        )
+        _plot_online_cost_vs_alpha(
+            output / "online_cost_vs_alpha.png",
+            online_rows,
+        )
     bundle = _bundle(output)
     print(f"Finished. Results: {bundle}", flush=True)
     return 0

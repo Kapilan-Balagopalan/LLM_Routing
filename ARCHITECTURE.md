@@ -91,18 +91,19 @@ It checks that updates correspond to the pending action and context.
 
 ### `algorithm.py`
 
-- `HGBETCPlayer`: routes strongly for 300 rounds, fits one histogram gradient
-  boosting classifier from those revealed labels, and freezes that estimator.
-  Future studies use 15 maximum leaves per boosting tree.
+- `HGBETCPlayer`: routes strongly for `ceil(n^(2/3))` rounds, fits one histogram
+  gradient boosting classifier from those revealed labels, and freezes that
+  estimator. With 12,648 online samples this is 543 tastes. Future studies use
+  15 maximum leaves per boosting tree.
 - `LogCBPSideATPlayer`: estimates a regularized linear logistic disagreement
   model and applies the restored empirical Mahalanobis-leverage confidence
-  radius without forced tastes. The active scale is 0.5 and the final radius
-  is capped at 1.0. The player incrementally caches revealed feature rows and
+  radius without forced tastes. The active scale is 0.25 and the final radius
+  is capped at 0.5. The player incrementally caches revealed feature rows and
   `V`; it refits from the same zero initialization only after a new taste.
 - `IGWPlayer`: estimates disagreement using an online-refitted histogram
   gradient boosting classifier and samples an arm using inverse-gap weighting.
-  The active study uses `mu=2`, fixed `gamma=64`, and the same 15-leaf HGB
-  profile as ETC.
+  The active study uses `mu=2`, `gamma=sqrt(n)` (112.463327356076 at
+  `n=12,648`), and the same 15-leaf HGB profile as ETC.
 - `RevealedFeedbackEstimator`: extracts only action-1 observations and applies
   capped inverse-propensity weights when supplied. It processes only newly
   appended history rows, so HGB is not refit or rebuilt after action-0 rounds.
@@ -139,7 +140,8 @@ The `simulate-llm-routing` entry point selects a manifest-defined context
 profile and runs online experiments, supervised skylines, or both. It writes
 reproducibility metadata, per-method summaries,
 optional synthetic outcome metadata, validation predictions, full online
-trajectories, plots, and a ZIP bundle. With no `--limit`, all 12,648 eligible
+trajectories, per-policy realized costs, routing-rate/accuracy and
+cost-versus-alpha plots, and a ZIP bundle. With no `--limit`, all 12,648 eligible
 BoolQ cache rows are online rounds. The supervised skyline remains a
 separate 4:1 train-validation task over the same selected outcome source.
 
@@ -177,9 +179,9 @@ or environment interfaces.
   and complete 142D manifest contexts with cached disagreement for a separate
   supervised skyline and full-stream online routing evaluation. It retains the
   multifeature forest-generated synthetic positive control.
-- `experiment/boolq-cbpside-beta1` preserves that implementation and compares
-  prompt-only 64D, non-prompt 74D, and complete 138D BoolQ contexts while
-  holding empirical scale 0.5 and cap 1.0 fixed.
+- `experiment/boolq-cbpside-beta1` preserves those context studies and adds a
+  complete 138D BoolQ follow-up with CBPSide scale 0.25/cap 0.5, ETC
+  `ceil(n^(2/3))` tastes, and IGW `gamma=sqrt(n)`.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather
 than inferring research intent from implementation details alone.

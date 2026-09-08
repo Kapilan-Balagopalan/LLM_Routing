@@ -13,7 +13,7 @@ decision.
 | `experiment/residual-diagnostics` | Real-data model-specification diagnostics |
 | `experiment/prompt-embedding` | Incremental semantic prompt-feature test |
 | `experiment/prompt-routing` | Frozen BoolQ empirical-scale-0.25 baseline at `a95a3ae` |
-| `experiment/boolq-cbpside-beta1` | BoolQ 64D prompt, 74D non-prompt, and 138D complete study at scale 0.5 |
+| `experiment/boolq-cbpside-beta1` | BoolQ context studies and 138D sample-size-scaled exploration follow-up |
 | `backup/current-combined` | Recovery snapshot before branch separation |
 
 Initial combined checkpoint: tag `current-combined-v1`, commit `3905bbf`.
@@ -586,6 +586,58 @@ simulate-llm-routing `
 ```
 
 No numerical conclusion is recorded until the result bundle is inspected.
+
+### BoolQ 138D sample-size-scaled exploration follow-up, 2026-09-08
+
+Branch: `experiment/boolq-cbpside-beta1`
+
+This one-run follow-up returns CBPSide to the empirical radius
+`min(0.25 * sqrt(x^T V^-1 x), 0.5)` and scales the two HGB routing policies to
+the actual online horizon `n` after eligibility filtering and any optional
+`--limit`. ETC uses `ceil(n^(2/3))` forced tastes before its one frozen fit.
+IGW uses `gamma=sqrt(n)`, `mu=2`, no forced tastes, and no class bootstrap.
+Explicit command-line ETC or gamma values remain available as overrides.
+
+For the complete BoolQ cache, `n=12,648`, so the rules give 543 ETC tastes and
+IGW gamma 112.463327356076. The context is the complete manifest-defined 138D
+block concatenation, the cached strong-model answer remains the routing
+reference, BoolQ gold answers are not routing labels, HGB has 15 leaves, random
+matches ETC traffic, the ten four-decimal loss values and seed 0 remain fixed,
+and the supervised skyline retains its separate stratified 4:1 split.
+
+The run now saves two standalone online figures in addition to the existing
+combined online/supervised figure: `online_routing_accuracy.png` preserves the
+strong-routing-rate versus routing-accuracy comparison, while
+`online_cost_vs_alpha.png` compares every policy's realized total cost against
+the decision threshold alpha. The latter labels `alpha = 1/l01` because
+`l11=1`. The per-policy CSV/JSON rows also retain the component counts and both
+total and per-example realized cost for later restyling.
+
+Planned command; implementation work must not execute the full experiment:
+
+```powershell
+simulate-llm-routing `
+  --cache .\boolq-routing-cache-full.zip `
+  --context-profile all-features `
+  --outcome-source cached `
+  --experiment all `
+  --l01-values 1.8182 1.9149 2.0225 2.1429 2.2785 2.4324 2.6087 2.8125 3.0508 3.3333 `
+  --l11 1 `
+  --cbpside-tastes 0 `
+  --cbpside-matrix-regularization 1 `
+  --cbpside-beta-scale 0.25 `
+  --cbpside-max-confidence-radius 0.5 `
+  --igw-min-tastes 0 `
+  --igw-mu 2 `
+  --hgb-max-leaf-nodes 15 `
+  --random-repeats 100 `
+  --skyline-validation-fraction 0.2 `
+  --seed 0 `
+  --output-dir .\boolq-all-features-138-scaled-exploration-results
+```
+
+No numerical conclusion is recorded until the user runs the experiment and the
+result bundle is inspected.
 
 ### Prompt-only 20D real-label fine-grid study, 2026-09-03
 

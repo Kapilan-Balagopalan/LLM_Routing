@@ -23,10 +23,13 @@ from llm_routing_simulation.skyline import (
 )
 from llm_routing_simulation.run import (
     DEFAULT_ALPHA_VALUES,
-    DEFAULT_IGW_GAMMA_VALUES,
     DEFAULT_L01_VALUES,
     SKYLINE_PLOT_MODELS,
     _parser,
+    _plot_online_cost_vs_alpha,
+    _plot_online_routing_accuracy,
+    _realized_cost_metrics,
+    _resolve_online_parameters,
 )
 from llm_routing_simulation.environment import CascadeRound
 
@@ -374,21 +377,20 @@ def test_online_exploration_defaults():
     assert args.context_profile == "non-prompt"
     assert args.prompt_components == 64
     assert args.outcome_source == "cached"
-    assert args.etc_tastes == 300
+    assert args.etc_tastes is None
     assert args.cbpside_tastes == 0
     assert args.cbpside_bootstrap_per_class == 0
     assert args.cbpside_bootstrap_max_tastes == 0
     assert args.cbpside_matrix_regularization == 1.0
-    assert args.cbpside_beta_scale == 0.5
-    assert LogCBPSideATConfig().beta_scale == 0.5
-    assert args.cbpside_max_confidence_radius == 1.0
-    assert LogCBPSideATConfig().max_confidence_radius == 1.0
+    assert args.cbpside_beta_scale == 0.25
+    assert LogCBPSideATConfig().beta_scale == 0.25
+    assert args.cbpside_max_confidence_radius == 0.5
+    assert LogCBPSideATConfig().max_confidence_radius == 0.5
     assert args.igw_min_tastes == 0
     assert args.igw_bootstrap_per_class == 0
     assert args.igw_bootstrap_max_tastes == 0
     assert args.igw_mu == 2.0
-    assert args.igw_gamma_values == list(DEFAULT_IGW_GAMMA_VALUES)
-    assert DEFAULT_IGW_GAMMA_VALUES == (64.0,)
+    assert args.igw_gamma_values is None
     assert args.hgb_max_leaf_nodes == [15]
     assert len(args.l01_values) == 10
     assert args.l01_values == list(DEFAULT_L01_VALUES)
@@ -412,6 +414,124 @@ def test_online_exploration_defaults():
     )
     assert np.allclose(DEFAULT_ALPHA_VALUES, np.linspace(0.55, 0.30, 10))
     assert args.skyline_validation_fraction == 0.2
+
+
+def test_online_parameters_resolve_from_actual_horizon():
+    args = _parser().parse_args(["--cache", "fixture.zip"])
+
+    resolution = _resolve_online_parameters(args, 12_648)
+
+    assert args.etc_tastes == 543
+    assert np.isclose(args.igw_gamma_values, [np.sqrt(12_648)]).all()
+    assert resolution == {
+        "total_samples": 12_648,
+        "etc_tastes": 543,
+        "etc_tastes_source": "ceil(n^(2/3))",
+        "igw_gamma_values": [np.sqrt(12_648)],
+        "igw_gamma_source": "sqrt(n)",
+    }
+
+
+def test_online_parameter_overrides_are_preserved():
+    args = _parser().parse_args(
+        [
+            "--cache",
+            "fixture.zip",
+            "--etc-tastes",
+            "300",
+            "--igw-gamma-values",
+            "64",
+            "128",
+        ]
+    )
+
+    resolution = _resolve_online_parameters(args, 12_648)
+
+    assert args.etc_tastes == 300
+    assert args.igw_gamma_values == [64.0, 128.0]
+    assert resolution["etc_tastes_source"] == "command_line"
+    assert resolution["igw_gamma_source"] == "command_line"
+
+
+def test_online_sweep_applies_horizon_derived_parameters(monkeypatch):
+    args = _parser().parse_args(["--cache", "fixture.zip"])
+    args.l01_values = [2.0]
+    rounds = [
+        CascadeRound(
+            example_id=f"boolq-{index}",
+            prompt="prompt",
+            context=np.asarray([0.1, -0.2]),
+            weak_answer="A",
+            strong_answer="B",
+            gold_answer="B",
+        )
+        for index in range(8)
+    ]
+    observed = {}
+
+    def fake_run(method, player, config, rounds, progress_label, metric):
+        if method.startswith("ETC"):
+            observed["etc_tastes"] = player.min_tastes
+        if method.startswith("IGW"):
+            observed["igw_gamma"] = player.fixed_gamma
+        return {"method": method, "routing_rate": 0.5}, []
+
+    monkeypatch.setattr(run_module, "_run_one_player", fake_run)
+    run_module.run_online(rounds, args)
+
+    assert observed["etc_tastes"] == 4
+    assert np.isclose(observed["igw_gamma"], np.sqrt(8))
+
+
+def test_realized_total_cost_matches_the_three_outcome_costs():
+    metrics = _realized_cost_metrics(
+        l01=3.0,
+        l11=1.0,
+        routing_rate=2 / 8,
+        accuracy=7 / 8,
+        examples=8,
+    )
+
+    assert metrics["routed_to_strong"] == 2.0
+    assert metrics["unrouted_disagreements"] == 1.0
+    assert metrics["realized_total_cost"] == 5.0
+    assert metrics["realized_cost_per_example"] == 5 / 8
+
+
+def test_online_comparison_plots_are_written(tmp_path):
+    rows = []
+    for method_index, method in enumerate(("CBPSide", "ETC", "IGW", "Random")):
+        for alpha in (0.4, 0.5):
+            l01 = 1.0 / alpha
+            routing_rate = 0.2 + 0.05 * method_index
+            accuracy = 0.7 + 0.04 * method_index
+            row = {
+                "method": method,
+                "l01": l01,
+                "l11": 1.0,
+                "alpha": alpha,
+                "routing_rate": routing_rate,
+                "accuracy": accuracy,
+                "examples": 100,
+            }
+            row.update(
+                _realized_cost_metrics(
+                    l01=l01,
+                    l11=1.0,
+                    routing_rate=routing_rate,
+                    accuracy=accuracy,
+                    examples=100,
+                )
+            )
+            rows.append(row)
+
+    routing_path = tmp_path / "online_routing_accuracy.png"
+    cost_path = tmp_path / "online_cost_vs_alpha.png"
+    _plot_online_routing_accuracy(routing_path, rows, "cached")
+    _plot_online_cost_vs_alpha(cost_path, rows)
+
+    assert routing_path.stat().st_size > 0
+    assert cost_path.stat().st_size > 0
 
 
 def test_uncertainty_prompt_context_profile_is_explicitly_selectable():
@@ -444,7 +564,16 @@ def test_non_prompt_context_profile_is_explicitly_selectable():
 
 
 def test_online_sweep_runs_every_hgb_capacity_with_fixed_gamma(monkeypatch):
-    args = _parser().parse_args(["--cache", "fixture.zip"])
+    args = _parser().parse_args(
+        [
+            "--cache",
+            "fixture.zip",
+            "--etc-tastes",
+            "300",
+            "--igw-gamma-values",
+            "64",
+        ]
+    )
     args.l01_values = [2.0]
     round_ = CascadeRound(
         example_id="arc-1",
