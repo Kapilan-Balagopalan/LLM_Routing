@@ -35,19 +35,20 @@ SKYLINE_PLOT_MODELS = (
     ),
 )
 
-DEFAULT_ALPHA_VALUES = tuple(np.linspace(0.55, 0.30, 10))
 DEFAULT_L01_VALUES = (
-    1.8182,
-    1.9149,
-    2.0225,
-    2.1429,
-    2.2785,
-    2.4324,
-    2.6087,
-    2.8125,
-    3.0508,
-    3.3333,
+    1.8,
+    2.0,
+    2.2,
+    2.4,
+    2.6,
+    2.8,
+    3.0,
+    3.2,
+    3.3,
 )
+DEFAULT_ALPHA_VALUES = tuple(1.0 / value for value in DEFAULT_L01_VALUES)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Replay online routing algorithms and supervised skylines offline."
@@ -106,7 +107,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cbpside-matrix-regularization", type=float, default=1.0
     )
-    parser.add_argument("--cbpside-beta-scale", type=float, default=0.25)
+    parser.add_argument("--cbpside-beta-scale", type=float, default=0.5)
     parser.add_argument(
         "--cbpside-max-confidence-radius", type=float, default=0.5
     )
@@ -130,6 +131,33 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--igw-mu", type=float, default=2.0)
     parser.add_argument("--igw-min-propensity", type=float, default=0.1)
     parser.add_argument("--random-repeats", type=int, default=100)
+    parser.add_argument(
+        "--online-refit-every-tastes",
+        type=int,
+        default=5,
+        help=(
+            "After the initial fit, refit CBPSide and IGW only after this many "
+            "additional revealed tastes"
+        ),
+    )
+    parser.add_argument(
+        "--online-order-repeats",
+        type=int,
+        default=1,
+        help=(
+            "Number of paired online order runs; values above one shuffle every "
+            "run independently"
+        ),
+    )
+    parser.add_argument(
+        "--online-trajectory-mode",
+        choices=("none", "first", "all"),
+        default="none",
+        help=(
+            "Save detailed online trajectories for no order runs, only the first, "
+            "or every run"
+        ),
+    )
     parser.add_argument("--skyline-validation-fraction", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=0)
     return parser
@@ -364,6 +392,7 @@ def _run_one_player(
     rounds,
     progress_label: str,
     metric: str,
+    collect_trajectories: bool = True,
 ):
     environment = LLMCascadeEnvironment(rounds)
     correct = 0
@@ -382,43 +411,50 @@ def _run_one_player(
         evaluation_outcome = rounds[transition.t - 1].routing_outcome
         correct += int(transition.action == 1 or evaluation_outcome == 0)
         routed += transition.action
-        trajectories.append(
-            {
-                "method": method,
-                "l01": config.loss_reject_disagreement,
-                "l11": config.loss_route_disagreement,
-                "alpha": getattr(decision, "threshold", None),
-                "t": transition.t,
-                "id": transition.example_id,
-                "context": observation.context.tolist(),
-                "weak_answer": observation.weak_answer,
-                "action": transition.action,
-                "feedback_revealed_to_player": transition.outcome,
-                "evaluation_only_routing_outcome": evaluation_outcome,
-                "predicted_disagreement": getattr(
-                    decision, "predicted_disagreement", None
-                ),
-                "reason": getattr(decision, "reason", None),
-                "confidence_radius": getattr(decision, "confidence_radius", None),
-                "theoretical_confidence_radius": getattr(
-                    decision, "theoretical_confidence_radius", None
-                ),
-                "estimator": getattr(decision, "estimator", "logistic_regression"),
-                "estimator_fitted": getattr(decision, "estimator_fitted", None),
-                "training_count": getattr(decision, "training_count", None),
-                "probability_1": getattr(decision, "probability_1", None),
-                "igw_gap": getattr(decision, "gap", None),
-                "igw_gamma": getattr(decision, "gamma", None),
-                "effective_sample_size": getattr(
-                    decision, "effective_sample_size", None
-                ),
-                "hgb_max_leaf_nodes": getattr(
-                    getattr(player, "estimator", None),
-                    "max_leaf_nodes",
-                    None,
-                ),
-            }
-        )
+        if collect_trajectories:
+            trajectories.append(
+                {
+                    "method": method,
+                    "l01": config.loss_reject_disagreement,
+                    "l11": config.loss_route_disagreement,
+                    "alpha": getattr(decision, "threshold", None),
+                    "t": transition.t,
+                    "id": transition.example_id,
+                    "context": observation.context.tolist(),
+                    "weak_answer": observation.weak_answer,
+                    "action": transition.action,
+                    "feedback_revealed_to_player": transition.outcome,
+                    "evaluation_only_routing_outcome": evaluation_outcome,
+                    "predicted_disagreement": getattr(
+                        decision, "predicted_disagreement", None
+                    ),
+                    "reason": getattr(decision, "reason", None),
+                    "confidence_radius": getattr(
+                        decision, "confidence_radius", None
+                    ),
+                    "theoretical_confidence_radius": getattr(
+                        decision, "theoretical_confidence_radius", None
+                    ),
+                    "estimator": getattr(
+                        decision, "estimator", "logistic_regression"
+                    ),
+                    "estimator_fitted": getattr(
+                        decision, "estimator_fitted", None
+                    ),
+                    "training_count": getattr(decision, "training_count", None),
+                    "probability_1": getattr(decision, "probability_1", None),
+                    "igw_gap": getattr(decision, "gap", None),
+                    "igw_gamma": getattr(decision, "gamma", None),
+                    "effective_sample_size": getattr(
+                        decision, "effective_sample_size", None
+                    ),
+                    "hgb_max_leaf_nodes": getattr(
+                        getattr(player, "estimator", None),
+                        "max_leaf_nodes",
+                        None,
+                    ),
+                }
+            )
         if transition.t % progress_every == 0 or transition.t == len(rounds):
             print(f"[{progress_label}] {transition.t}/{len(rounds)}", flush=True)
 
@@ -455,6 +491,12 @@ def _run_one_player(
             player,
             "theta_fit_count",
             getattr(getattr(player, "estimator", None), "fit_count", None),
+        ),
+        "refit_every_tastes": getattr(player, "refit_every_tastes", None),
+        "last_model_training_count": getattr(
+            player,
+            "last_model_training_count",
+            getattr(getattr(player, "estimator", None), "fitted_count", None),
         ),
     }
     result.update(
@@ -495,10 +537,11 @@ def _random_matched(
         "alpha": 1.0 / (1.0 + l01 - l11),
         "routing_rate": float(np.mean(rates)),
         "accuracy": float(np.mean(accuracies)),
-        "accuracy_std": float(np.std(accuracies)),
+        "random_assignment_accuracy_std": float(np.std(accuracies)),
         "metric": metric,
         "examples": len(rounds),
         "random_repeats": repeats,
+        "random_seed": seed,
         "hgb_max_leaf_nodes": hgb_max_leaf_nodes,
     }
     result.update(
@@ -513,9 +556,12 @@ def _random_matched(
     return result
 
 
-def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
+def run_online(
+    rounds, args, *, collect_trajectories: bool = True
+) -> tuple[list[dict], list[dict]]:
     """Run HGB ETC/IGW, linear-logistic CBPSide, and matched random."""
-    _resolve_online_parameters(args, len(rounds))
+    if args.etc_tastes is None or args.igw_gamma_values is None:
+        _resolve_online_parameters(args, len(rounds))
     context_dim = int(rounds[0].context.size)
     metric = (
         "synthetic_routing_accuracy"
@@ -542,11 +588,16 @@ def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
         )
         cbpside_result, cbpside_path = _run_one_player(
             "CBPSide",
-            LogCBPSideATPlayer(context_dim, cbpside),
+            LogCBPSideATPlayer(
+                context_dim,
+                cbpside,
+                refit_every_tastes=args.online_refit_every_tastes,
+            ),
             cbpside,
             rounds,
             f"l01={l01:g} CBPSide",
             metric,
+            collect_trajectories,
         )
         rows.append(cbpside_result)
         trajectories.extend(cbpside_path)
@@ -565,6 +616,7 @@ def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
                 rounds,
                 f"l01={l01:g} {etc_method}",
                 metric,
+                collect_trajectories,
             )
             rows.append(etc_result)
             trajectories.extend(etc_path)
@@ -586,12 +638,14 @@ def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
                         fixed_gamma=gamma,
                         min_propensity=args.igw_min_propensity,
                         hgb_max_leaf_nodes=max_leaf_nodes,
+                        refit_every_tastes=args.online_refit_every_tastes,
                         seed=args.seed,
                     ),
                     base,
                     rounds,
                     f"l01={l01:g} {igw_method}",
                     metric,
+                    collect_trajectories,
                 )
                 rows.append(igw_result)
                 trajectories.extend(igw_path)
@@ -609,6 +663,144 @@ def run_online(rounds, args) -> tuple[list[dict], list[dict]]:
                 )
             )
     return rows, trajectories
+
+
+ONLINE_AGGREGATE_METRICS = (
+    "routing_rate",
+    "accuracy",
+    "routed_to_strong",
+    "unrouted_disagreements",
+    "realized_cost_per_example",
+    "realized_total_cost",
+    "model_refits",
+    "last_model_training_count",
+)
+
+
+def _shuffled_online_rounds(rounds, seed: int):
+    """Return a deterministic permutation without mutating canonical rounds."""
+    permutation = np.random.default_rng(seed).permutation(len(rounds)).astype(
+        np.int32
+    )
+    return [rounds[int(index)] for index in permutation], permutation
+
+
+def _aggregate_online_order_rows(rows: list[dict]) -> list[dict]:
+    """Aggregate per-order online metrics and retain sample variability."""
+    groups: dict[tuple[str, float, float], list[dict]] = {}
+    for row in rows:
+        key = (row["method"], float(row["l01"]), float(row["l11"]))
+        groups.setdefault(key, []).append(row)
+
+    aggregated = []
+    for group in groups.values():
+        first = group[0]
+        result = {
+            key: value
+            for key, value in first.items()
+            if key
+            not in {
+                *ONLINE_AGGREGATE_METRICS,
+                "order_run",
+                "order_seed",
+                "order_was_shuffled",
+                "random_assignment_accuracy_std",
+            }
+        }
+        result["online_order_repeats"] = len(group)
+        result["order_seeds"] = [row["order_seed"] for row in group]
+        result["error_bar_definition"] = (
+            "sample standard deviation across shuffled online orders"
+        )
+        for metric in ONLINE_AGGREGATE_METRICS:
+            values = [row.get(metric) for row in group]
+            if any(value is None for value in values):
+                continue
+            array = np.asarray(values, dtype=np.float64)
+            mean = float(np.mean(array))
+            std = float(np.std(array, ddof=1)) if len(array) > 1 else 0.0
+            result[metric] = mean
+            result[f"{metric}_mean"] = mean
+            result[f"{metric}_std"] = std
+            result[f"{metric}_sem"] = float(std / np.sqrt(len(array)))
+        aggregated.append(result)
+    return aggregated
+
+
+def run_online_order_repeats(rounds, args):
+    """Run paired policies over canonical or repeatedly shuffled online orders."""
+    if args.online_order_repeats < 1:
+        raise ValueError("online_order_repeats must be positive")
+    if args.etc_tastes is None or args.igw_gamma_values is None:
+        _resolve_online_parameters(args, len(rounds))
+
+    raw_rows: list[dict] = []
+    trajectories: list[dict] = []
+    permutations: list[np.ndarray] = []
+    order_runs: list[dict] = []
+    shuffle_orders = args.online_order_repeats > 1
+    for order_index in range(args.online_order_repeats):
+        if shuffle_orders:
+            order_seed = args.seed + order_index
+            ordered_rounds, permutation = _shuffled_online_rounds(
+                rounds, order_seed
+            )
+        else:
+            order_seed = None
+            ordered_rounds = list(rounds)
+            permutation = np.arange(len(rounds), dtype=np.int32)
+        permutations.append(permutation)
+        order_runs.append(
+            {
+                "order_run": order_index + 1,
+                "order_seed": order_seed,
+                "policy_seed": args.seed,
+                "shuffled": shuffle_orders,
+            }
+        )
+        collect_trajectories = args.online_trajectory_mode == "all" or (
+            args.online_trajectory_mode == "first" and order_index == 0
+        )
+        print(
+            f"[online order {order_index + 1}/{args.online_order_repeats}] "
+            + (
+                f"shuffle seed={order_seed}"
+                if shuffle_orders
+                else "canonical order"
+            ),
+            flush=True,
+        )
+        rows, order_trajectories = run_online(
+            ordered_rounds,
+            args,
+            collect_trajectories=collect_trajectories,
+        )
+        for row in rows:
+            row.update(
+                {
+                    "order_run": order_index + 1,
+                    "order_seed": order_seed,
+                    "order_was_shuffled": shuffle_orders,
+                    "policy_seed": args.seed,
+                }
+            )
+        for trajectory in order_trajectories:
+            trajectory.update(
+                {
+                    "order_run": order_index + 1,
+                    "order_seed": order_seed,
+                }
+            )
+        raw_rows.extend(rows)
+        trajectories.extend(order_trajectories)
+
+    return (
+        _aggregate_online_order_rows(raw_rows),
+        raw_rows,
+        trajectories,
+        np.stack(permutations),
+        order_runs,
+    )
 
 
 def run_skyline(
@@ -669,18 +861,27 @@ def _plot(
         methods = list(dict.fromkeys(row["method"] for row in online_rows))
         for method in methods:
             selected = [row for row in online_rows if row["method"] == method]
-            selected.sort(key=lambda row: row["routing_rate"])
-            axes[0].plot(
+            selected.sort(key=lambda row: row["l01"])
+            axes[0].errorbar(
                 [row["routing_rate"] for row in selected],
                 [row["accuracy"] for row in selected],
-                marker="o",
+                xerr=[row.get("routing_rate_std", 0.0) for row in selected],
+                yerr=[row.get("accuracy_std", 0.0) for row in selected],
+                fmt="-o",
+                capsize=2,
                 label=method,
             )
-        axes[0].set_title(
+        online_title = (
             "Online routing on synthetic outcomes"
             if outcome_source == "synthetic"
             else "Online routing on cached disagreement"
         )
+        order_repeats = max(
+            int(row.get("online_order_repeats", 1)) for row in online_rows
+        )
+        if order_repeats > 1:
+            online_title += f"\nMean +/- 1 SD across {order_repeats} orders"
+        axes[0].set_title(online_title)
         axes[0].legend(fontsize=8)
     else:
         axes[0].text(0.5, 0.5, "Online experiment not requested", ha="center")
@@ -738,11 +939,14 @@ def _plot_online_routing_accuracy(
     methods = list(dict.fromkeys(row["method"] for row in online_rows))
     for method in methods:
         selected = [row for row in online_rows if row["method"] == method]
-        selected.sort(key=lambda row: row["routing_rate"])
-        axis.plot(
+        selected.sort(key=lambda row: row["l01"])
+        axis.errorbar(
             [row["routing_rate"] for row in selected],
             [row["accuracy"] for row in selected],
-            marker="o",
+            xerr=[row.get("routing_rate_std", 0.0) for row in selected],
+            yerr=[row.get("accuracy_std", 0.0) for row in selected],
+            fmt="-o",
+            capsize=3,
             label=method,
         )
     axis.set_xlim(0, 1)
@@ -757,49 +961,60 @@ def _plot_online_routing_accuracy(
         if outcome_source == "synthetic"
         else "Agreement with cached strong-model reference"
     )
-    axis.set_title("Online routing rate versus accuracy")
+    order_repeats = max(
+        int(row.get("online_order_repeats", 1)) for row in online_rows
+    )
+    title = "Online routing rate versus accuracy"
+    if order_repeats > 1:
+        title += (
+            f"\nMean +/- 1 SD across {order_repeats} shuffled online orders"
+        )
+    axis.set_title(title)
     axis.grid(alpha=0.25)
     axis.legend(fontsize=8)
     figure.savefig(output, dpi=180)
     plt.close(figure)
 
 
-def _plot_online_cost_vs_alpha(output: Path, online_rows: list[dict]) -> None:
-    """Plot every online policy's realized total cost against alpha."""
+def _plot_online_cost_vs_l01(output: Path, online_rows: list[dict]) -> None:
+    """Plot every online policy's realized total cost against l01."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    figure, axis = plt.subplots(figsize=(9, 6))
+    figure, axis = plt.subplots(figsize=(9, 6), constrained_layout=True)
     methods = list(dict.fromkeys(row["method"] for row in online_rows))
     for method in methods:
         selected = [row for row in online_rows if row["method"] == method]
-        selected.sort(key=lambda row: row["alpha"])
-        axis.plot(
-            [row["alpha"] for row in selected],
+        selected.sort(key=lambda row: row["l01"])
+        axis.errorbar(
+            [row["l01"] for row in selected],
             [row["realized_total_cost"] for row in selected],
-            marker="o",
+            yerr=[
+                row.get("realized_total_cost_std", 0.0) for row in selected
+            ],
+            fmt="-o",
+            capsize=3,
             label=method,
         )
 
-    alpha_ticks = sorted({float(row["alpha"]) for row in online_rows})
-    axis.set_xticks(alpha_ticks, [f"{value:.4f}" for value in alpha_ticks])
-    axis.set_xlabel(r"Decision threshold $\alpha$")
+    l01_ticks = sorted({float(row["l01"]) for row in online_rows})
+    axis.set_xticks(l01_ticks, [f"{value:g}" for value in l01_ticks])
+    axis.set_xlabel(r"Unrouted-disagreement cost $\ell_{01}$")
     examples = int(online_rows[0]["examples"])
     axis.set_ylabel(f"Realized total cost over {examples:,} online samples")
-    axis.set_title("Online realized total cost versus decision threshold")
+    order_repeats = max(
+        int(row.get("online_order_repeats", 1)) for row in online_rows
+    )
+    title = r"Online realized total cost versus $\ell_{01}$"
+    if order_repeats > 1:
+        title += (
+            f"\nMean +/- 1 SD across {order_repeats} shuffled online orders"
+        )
+    axis.set_title(title)
     axis.grid(alpha=0.25)
     axis.legend(fontsize=8)
-
-    l11_values = {float(row["l11"]) for row in online_rows}
-    relation = (
-        r"$\alpha = 1/\ell_{01}$ (because $\ell_{11}=1$)"
-        if l11_values == {1.0}
-        else r"$\alpha = 1/(1+\ell_{01}-\ell_{11})$"
-    )
-    figure.text(0.5, 0.02, relation, ha="center")
-    figure.tight_layout(rect=(0.0, 0.06, 1.0, 1.0))
     figure.savefig(output, dpi=180)
     plt.close(figure)
 
@@ -819,6 +1034,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise SystemExit("Every l01 must be greater than or equal to l11")
     if args.random_repeats < 1:
         raise SystemExit("Random repeats must be positive")
+    if args.online_order_repeats < 1:
+        raise SystemExit("Online order repeats must be positive")
+    if args.online_refit_every_tastes < 1:
+        raise SystemExit("Online refit interval must be positive")
     if args.igw_gamma_values is not None and any(
         value <= 0.0 for value in args.igw_gamma_values
     ):
@@ -860,7 +1079,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(
             "Online parameters: "
             f"n={len(rounds)}, ETC tastes={args.etc_tastes}, "
-            f"IGW gamma={args.igw_gamma_values[0]:.12g}.",
+            f"IGW gamma={args.igw_gamma_values[0]:.12g}, "
+            f"adaptive refit interval={args.online_refit_every_tastes} tastes, "
+            f"order runs={args.online_order_repeats}.",
             flush=True,
         )
     output = args.output_dir.resolve()
@@ -874,21 +1095,44 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
 
     online_rows: list[dict] = []
+    online_order_rows: list[dict] = []
     trajectories: list[dict] = []
+    online_permutations: np.ndarray | None = None
+    online_order_runs: list[dict] = []
     skyline_rows: list[dict] = []
     skyline_summary: dict = {}
     skyline_prediction_rows: list[dict] = []
     if args.experiment in {"all", "online"}:
-        online_rows, trajectories = run_online(rounds, args)
+        (
+            online_rows,
+            online_order_rows,
+            trajectories,
+            online_permutations,
+            online_order_runs,
+        ) = run_online_order_repeats(rounds, args)
         _write_csv(output / "online_results.csv", online_rows)
         (output / "online_results.json").write_text(
             json.dumps(_jsonable(online_rows), indent=2), encoding="utf-8"
         )
-        with (output / "online_trajectories.jsonl").open(
-            "w", encoding="utf-8"
-        ) as handle:
-            for row in trajectories:
-                handle.write(json.dumps(_jsonable(row)) + "\n")
+        _write_csv(output / "online_results_by_order.csv", online_order_rows)
+        (output / "online_results_by_order.json").write_text(
+            json.dumps(_jsonable(online_order_rows), indent=2), encoding="utf-8"
+        )
+        if online_permutations is not None and args.online_order_repeats > 1:
+            np.savez_compressed(
+                output / "online_order_permutations.npz",
+                permutation_indices=online_permutations,
+                order_seeds=np.asarray(
+                    [row["order_seed"] for row in online_order_runs],
+                    dtype=np.int64,
+                ),
+            )
+        if trajectories:
+            with (output / "online_trajectories.jsonl").open(
+                "w", encoding="utf-8"
+            ) as handle:
+                for row in trajectories:
+                    handle.write(json.dumps(_jsonable(row)) + "\n")
     if args.experiment in {"all", "skyline"}:
         skyline_rows, skyline_summary, skyline_prediction_rows = run_skyline(
             rounds,
@@ -945,6 +1189,14 @@ def main(argv: Iterable[str] | None = None) -> int:
         ],
         "experiment": args.experiment,
         "online_parameter_resolution": online_parameter_resolution,
+        "online_order_runs": online_order_runs,
+        "online_error_bars": (
+            "mean plus/minus one sample standard deviation across online orders"
+            if online_rows and args.online_order_repeats > 1
+            else "not applicable to a single online order"
+            if online_rows
+            else None
+        ),
         "parameters": vars(args)
         | {"cache": str(args.cache), "output_dir": str(args.output_dir)},
         "skyline": skyline_summary,
@@ -964,8 +1216,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             online_rows,
             args.outcome_source,
         )
-        _plot_online_cost_vs_alpha(
-            output / "online_cost_vs_alpha.png",
+        _plot_online_cost_vs_l01(
+            output / "online_cost_vs_l01.png",
             online_rows,
         )
     bundle = _bundle(output)

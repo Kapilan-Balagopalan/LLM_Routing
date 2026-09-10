@@ -25,11 +25,13 @@ from llm_routing_simulation.run import (
     DEFAULT_ALPHA_VALUES,
     DEFAULT_L01_VALUES,
     SKYLINE_PLOT_MODELS,
+    _aggregate_online_order_rows,
     _parser,
-    _plot_online_cost_vs_alpha,
+    _plot_online_cost_vs_l01,
     _plot_online_routing_accuracy,
     _realized_cost_metrics,
     _resolve_online_parameters,
+    _shuffled_online_rounds,
 )
 from llm_routing_simulation.environment import CascadeRound
 
@@ -135,6 +137,40 @@ def test_cbpside_refits_only_after_a_new_taste_and_matches_fresh_fit():
     assert observed_fit_counts == [0, 1, 2, 2]
     assert player.actions[:2] == [1, 1]
     assert player.actions[2:] == [0, 0]
+
+
+def test_cbpside_refits_after_each_five_additional_tastes():
+    config = LogCBPSideATConfig(min_tastes=100, use_confidence_bound=False)
+    player = LogCBPSideATPlayer(2, config, refit_every_tastes=5)
+    fit_sizes = []
+    original_estimate = player.algorithm._estimate_theta
+
+    def recording_estimate(contexts, outcomes, model_dim):
+        fit_sizes.append(len(outcomes))
+        return original_estimate(contexts, outcomes, model_dim)
+
+    player.algorithm._estimate_theta = recording_estimate
+    previous_V = player._V.copy()
+    for index in range(12):
+        context = np.asarray([index / 10.0, (-1.0) ** index])
+        decision = player.next_action(context)
+        assert decision.action == 1
+        player.update(1, context, index % 2)
+        assert not np.array_equal(player._V, previous_V)
+        previous_V = player._V.copy()
+
+    assert fit_sizes == [1, 6, 11]
+    assert player.theta_fit_count == 3
+    assert player.last_model_training_count == 11
+    assert player._fit_dirty is True
+
+
+def test_online_refit_interval_must_be_positive():
+    config = LogCBPSideATConfig()
+    with pytest.raises(ValueError, match="refit_every_tastes"):
+        LogCBPSideATPlayer(2, config, refit_every_tastes=0)
+    with pytest.raises(ValueError, match="refit_every_tastes"):
+        HGBEstimator(2, refit_every_tastes=0)
 
 
 def test_cbpside_cached_diagnostics_are_read_only_and_failed_update_is_atomic():
@@ -295,6 +331,70 @@ def test_hgb_cache_refits_only_for_new_tastes_and_preserves_freeze():
     assert frozen.model is frozen_model
 
 
+def test_hgb_refits_after_each_five_additional_tastes():
+    class FakeModel:
+        def fit(self, features, labels, sample_weight):
+            fit_sizes.append(len(labels))
+            self.probability = float(np.average(labels, weights=sample_weight))
+
+        def predict_proba(self, features):
+            return np.asarray(
+                [[1.0 - self.probability, self.probability]] * len(features)
+            )
+
+    fit_sizes = []
+    estimator = HGBEstimator(2, refit_every_tastes=5, seed=3)
+    estimator._new_model = FakeModel
+    actions = [1, 1, 1, 1]
+    contexts = [
+        np.asarray([0.1, 0.0]),
+        np.asarray([0.2, 0.1]),
+        np.asarray([-0.1, 0.2]),
+        np.asarray([-0.2, -0.1]),
+    ]
+    outcomes = [0, 0, 1, 1]
+    propensities = [1.0] * 4
+    current = np.asarray([0.3, -0.2])
+
+    estimator.predict(
+        actions,
+        contexts,
+        outcomes,
+        current,
+        sampling_probabilities=propensities,
+    )
+    assert fit_sizes == [4]
+
+    for index, outcome in enumerate([0, 1, 0, 1], start=5):
+        actions.append(1)
+        contexts.append(np.asarray([index / 10.0, -index / 10.0]))
+        outcomes.append(outcome)
+        propensities.append(1.0)
+        estimator.predict(
+            actions,
+            contexts,
+            outcomes,
+            current,
+            sampling_probabilities=propensities,
+        )
+    assert fit_sizes == [4]
+    assert estimator.fitted_count == 4
+
+    actions.append(1)
+    contexts.append(np.asarray([0.9, -0.9]))
+    outcomes.append(0)
+    propensities.append(1.0)
+    estimator.predict(
+        actions,
+        contexts,
+        outcomes,
+        current,
+        sampling_probabilities=propensities,
+    )
+    assert fit_sizes == [4, 9]
+    assert estimator.fitted_count == 9
+
+
 def test_online_hgb_capacity_is_configurable_without_changing_other_settings():
     estimator = HGBEstimator(8, max_leaf_nodes=7, seed=12)
     model = estimator._new_model()
@@ -382,8 +482,8 @@ def test_online_exploration_defaults():
     assert args.cbpside_bootstrap_per_class == 0
     assert args.cbpside_bootstrap_max_tastes == 0
     assert args.cbpside_matrix_regularization == 1.0
-    assert args.cbpside_beta_scale == 0.25
-    assert LogCBPSideATConfig().beta_scale == 0.25
+    assert args.cbpside_beta_scale == 0.5
+    assert LogCBPSideATConfig().beta_scale == 0.5
     assert args.cbpside_max_confidence_radius == 0.5
     assert LogCBPSideATConfig().max_confidence_radius == 0.5
     assert args.igw_min_tastes == 0
@@ -392,27 +492,25 @@ def test_online_exploration_defaults():
     assert args.igw_mu == 2.0
     assert args.igw_gamma_values is None
     assert args.hgb_max_leaf_nodes == [15]
-    assert len(args.l01_values) == 10
+    assert args.online_order_repeats == 1
+    assert args.online_trajectory_mode == "none"
+    assert args.online_refit_every_tastes == 5
+    assert len(args.l01_values) == 9
     assert args.l01_values == list(DEFAULT_L01_VALUES)
     assert DEFAULT_L01_VALUES == (
-        1.8182,
-        1.9149,
-        2.0225,
-        2.1429,
-        2.2785,
-        2.4324,
-        2.6087,
-        2.8125,
-        3.0508,
-        3.3333,
+        1.8,
+        2.0,
+        2.2,
+        2.4,
+        2.6,
+        2.8,
+        3.0,
+        3.2,
+        3.3,
     )
     assert np.allclose(
-        [1.0 / value for value in args.l01_values],
-        DEFAULT_ALPHA_VALUES,
-        rtol=0.0,
-        atol=1e-5,
+        [1.0 / value for value in args.l01_values], DEFAULT_ALPHA_VALUES
     )
-    assert np.allclose(DEFAULT_ALPHA_VALUES, np.linspace(0.55, 0.30, 10))
     assert args.skyline_validation_fraction == 0.2
 
 
@@ -453,6 +551,134 @@ def test_online_parameter_overrides_are_preserved():
     assert resolution["igw_gamma_source"] == "command_line"
 
 
+def test_shuffled_online_rounds_are_reproducible_complete_and_nonmutating():
+    rounds = [
+        CascadeRound(
+            example_id=f"boolq-{index}",
+            prompt="prompt",
+            context=np.asarray([float(index)]),
+            weak_answer="A",
+            strong_answer="B",
+            gold_answer="B",
+        )
+        for index in range(12)
+    ]
+    original_ids = [row.example_id for row in rounds]
+
+    first, first_indices = _shuffled_online_rounds(rounds, 7)
+    repeated, repeated_indices = _shuffled_online_rounds(rounds, 7)
+    different, different_indices = _shuffled_online_rounds(rounds, 8)
+
+    assert np.array_equal(first_indices, repeated_indices)
+    assert not np.array_equal(first_indices, different_indices)
+    assert [row.example_id for row in first] == [
+        row.example_id for row in repeated
+    ]
+    assert [row.example_id for row in first] != [
+        row.example_id for row in different
+    ]
+    assert sorted(row.example_id for row in first) == sorted(original_ids)
+    assert [row.example_id for row in rounds] == original_ids
+
+
+def test_online_order_aggregation_uses_sample_standard_deviation():
+    rows = []
+    for order_run, routing_rate, accuracy, total_cost in (
+        (1, 0.2, 0.7, 50.0),
+        (2, 0.4, 0.9, 70.0),
+    ):
+        rows.append(
+            {
+                "method": "CBPSide",
+                "l01": 2.0,
+                "l11": 1.0,
+                "alpha": 0.5,
+                "examples": 100,
+                "routing_rate": routing_rate,
+                "accuracy": accuracy,
+                "routed_to_strong": routing_rate * 100,
+                "unrouted_disagreements": (1.0 - accuracy) * 100,
+                "realized_cost_per_example": total_cost / 100,
+                "realized_total_cost": total_cost,
+                "model_refits": 10 + order_run,
+                "order_run": order_run,
+                "order_seed": order_run - 1,
+                "order_was_shuffled": True,
+                "policy_seed": 0,
+            }
+        )
+
+    [result] = _aggregate_online_order_rows(rows)
+
+    assert result["online_order_repeats"] == 2
+    assert result["order_seeds"] == [0, 1]
+    assert result["routing_rate"] == pytest.approx(0.3)
+    assert result["accuracy"] == pytest.approx(0.8)
+    assert result["realized_total_cost"] == pytest.approx(60.0)
+    assert result["realized_total_cost_std"] == pytest.approx(np.sqrt(200.0))
+    assert result["realized_total_cost_sem"] == pytest.approx(10.0)
+
+
+def test_online_order_repeats_use_distinct_full_permutations(monkeypatch):
+    args = _parser().parse_args(
+        [
+            "--cache",
+            "fixture.zip",
+            "--online-order-repeats",
+            "3",
+        ]
+    )
+    rounds = [
+        CascadeRound(
+            example_id=f"boolq-{index}",
+            prompt="prompt",
+            context=np.asarray([float(index)]),
+            weak_answer="A",
+            strong_answer="B",
+            gold_answer="B",
+        )
+        for index in range(8)
+    ]
+    observed_orders = []
+    observed_collection_flags = []
+
+    def fake_online(ordered_rounds, parsed_args, *, collect_trajectories):
+        observed_orders.append(tuple(row.example_id for row in ordered_rounds))
+        observed_collection_flags.append(collect_trajectories)
+        result = {
+            "method": "CBPSide",
+            "l01": 2.0,
+            "l11": 1.0,
+            "alpha": 0.5,
+            "examples": len(ordered_rounds),
+            "routing_rate": 0.5,
+            "accuracy": 0.75,
+            "routed_to_strong": 4.0,
+            "unrouted_disagreements": 2.0,
+            "realized_cost_per_example": 1.0,
+            "realized_total_cost": 8.0,
+            "model_refits": 2,
+        }
+        return [result], []
+
+    monkeypatch.setattr(run_module, "run_online", fake_online)
+    aggregate, raw, trajectories, permutations, metadata = (
+        run_module.run_online_order_repeats(rounds, args)
+    )
+
+    assert len(observed_orders) == 3
+    assert len(set(observed_orders)) == 3
+    assert all(sorted(order) == sorted(observed_orders[0]) for order in observed_orders)
+    assert observed_collection_flags == [False, False, False]
+    assert args.etc_tastes == 4
+    assert args.igw_gamma_values == pytest.approx([np.sqrt(8)])
+    assert [row["order_seed"] for row in raw] == [0, 1, 2]
+    assert aggregate[0]["online_order_repeats"] == 3
+    assert trajectories == []
+    assert permutations.shape == (3, 8)
+    assert [row["order_seed"] for row in metadata] == [0, 1, 2]
+
+
 def test_online_sweep_applies_horizon_derived_parameters(monkeypatch):
     args = _parser().parse_args(["--cache", "fixture.zip"])
     args.l01_values = [2.0]
@@ -469,18 +695,33 @@ def test_online_sweep_applies_horizon_derived_parameters(monkeypatch):
     ]
     observed = {}
 
-    def fake_run(method, player, config, rounds, progress_label, metric):
+    def fake_run(
+        method,
+        player,
+        config,
+        rounds,
+        progress_label,
+        metric,
+        collect_trajectories,
+    ):
+        if method == "CBPSide":
+            observed["cbpside_refit_every"] = player.refit_every_tastes
         if method.startswith("ETC"):
             observed["etc_tastes"] = player.min_tastes
+            observed["etc_refit_every"] = player.estimator.refit_every_tastes
         if method.startswith("IGW"):
             observed["igw_gamma"] = player.fixed_gamma
+            observed["igw_refit_every"] = player.refit_every_tastes
         return {"method": method, "routing_rate": 0.5}, []
 
     monkeypatch.setattr(run_module, "_run_one_player", fake_run)
     run_module.run_online(rounds, args)
 
     assert observed["etc_tastes"] == 4
+    assert observed["etc_refit_every"] == 1
     assert np.isclose(observed["igw_gamma"], np.sqrt(8))
+    assert observed["cbpside_refit_every"] == 5
+    assert observed["igw_refit_every"] == 5
 
 
 def test_realized_total_cost_matches_the_three_outcome_costs():
@@ -511,8 +752,11 @@ def test_online_comparison_plots_are_written(tmp_path):
                 "l11": 1.0,
                 "alpha": alpha,
                 "routing_rate": routing_rate,
+                "routing_rate_std": 0.01,
                 "accuracy": accuracy,
+                "accuracy_std": 0.02,
                 "examples": 100,
+                "online_order_repeats": 10,
             }
             row.update(
                 _realized_cost_metrics(
@@ -523,15 +767,19 @@ def test_online_comparison_plots_are_written(tmp_path):
                     examples=100,
                 )
             )
+            row["realized_total_cost_std"] = 2.0
             rows.append(row)
 
     routing_path = tmp_path / "online_routing_accuracy.png"
-    cost_path = tmp_path / "online_cost_vs_alpha.png"
+    cost_path = tmp_path / "online_cost_vs_l01.png"
+    combined_path = tmp_path / "routing_comparison.png"
     _plot_online_routing_accuracy(routing_path, rows, "cached")
-    _plot_online_cost_vs_alpha(cost_path, rows)
+    _plot_online_cost_vs_l01(cost_path, rows)
+    run_module._plot(combined_path, rows, [], "cached")
 
     assert routing_path.stat().st_size > 0
     assert cost_path.stat().st_size > 0
+    assert combined_path.stat().st_size > 0
 
 
 def test_uncertainty_prompt_context_profile_is_explicitly_selectable():
@@ -583,14 +831,27 @@ def test_online_sweep_runs_every_hgb_capacity_with_fixed_gamma(monkeypatch):
         strong_answer="B",
         gold_answer="B",
     )
+    collection_flags = []
 
-    def fake_run(method, player, config, rounds, progress_label, metric):
+    def fake_run(
+        method,
+        player,
+        config,
+        rounds,
+        progress_label,
+        metric,
+        collect_trajectories,
+    ):
+        collection_flags.append(collect_trajectories)
         return {"method": method, "routing_rate": 0.5}, []
 
     monkeypatch.setattr(run_module, "_run_one_player", fake_run)
-    rows, trajectories = run_module.run_online([round_], args)
+    rows, trajectories = run_module.run_online(
+        [round_], args, collect_trajectories=False
+    )
 
     assert trajectories == []
+    assert collection_flags == [False, False, False]
     assert [row["method"] for row in rows] == [
         "CBPSide",
         "ETC HGB leaves=15",
@@ -613,7 +874,15 @@ def test_online_hgb_seed_is_constant_across_loss_points(monkeypatch):
     )
     observed_seeds = []
 
-    def fake_run(method, player, config, rounds, progress_label, metric):
+    def fake_run(
+        method,
+        player,
+        config,
+        rounds,
+        progress_label,
+        metric,
+        collect_trajectories,
+    ):
         if hasattr(player, "estimator"):
             observed_seeds.append(player.estimator.seed)
         return {"method": method, "routing_rate": 0.5}, []

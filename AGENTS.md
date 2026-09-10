@@ -18,8 +18,22 @@
 - `experiment/prompt-routing`: frozen prompt-routing and BoolQ empirical-scale
   0.25 baseline at commit `a95a3ae`.
 - `experiment/boolq-cbpside-beta1`: BoolQ confidence-scale and context
-  follow-up; the active study uses all 138 features, CBPSide scale 0.25/cap
-  0.5, ETC `ceil(n^(2/3))` tastes, and IGW `gamma=sqrt(n)`.
+  follow-up; the active study uses all 138 features, CBPSide scale 0.5/cap
+  0.5, ETC `ceil(n^(2/3))` tastes, IGW `gamma=sqrt(n)`, and ten paired shuffled
+  online orders with sample-SD error bars. CBPSide and IGW refit after every
+  five additional tastes; ETC still fits once and freezes. The separate
+  `tune-llm-routing` study extends this baseline to 20 paired orders and
+  pointwise multipliers `0.1, 0.3, 1, 3, 10`, using strict global-round
+  doubling epochs and resumable candidate checkpoints. It compares IGW Tree
+  with IGW Linear under the same configured 138D context, gamma grid, paired
+  orders, epoch schedule, and inverse-propensity-weighting rule; only the
+  configured probability estimator differs. Their actions can diverge, so they
+  need not realize the same feedback rows or IPS weights. Report both the
+  separately tuned best-vs-best comparison, whose selected gammas may differ,
+  and the fixed-multiplier matched-gamma estimator comparison. HGB remains the
+  nonlinear primary; `river-hoeffding` is an explicit tree sensitivity option.
+  IGW Linear adds 900 full-history weighted scaler/logistic trajectories, so
+  use the new `hgb-linear` output directory and preserve checkpoint resume.
 - `backup/current-combined`: recovery snapshot made before branch separation.
 
 Do not mix an experiment into another branch. Shared bug fixes should be made
@@ -64,6 +78,12 @@ Install locally with:
 
 ```powershell
 python -m pip install -e ".[test]"
+```
+
+The optional incremental-tree tuning study requires:
+
+```powershell
+python -m pip install -e ".[test,online-tree]"
 ```
 
 Run tests with:

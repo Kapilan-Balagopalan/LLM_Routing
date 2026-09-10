@@ -4,13 +4,17 @@ This repository replays weak-versus-strong LLM routing policies from collected
 benchmark caches. It is CPU-only: the simulation does not load an LLM, contact
 Hugging Face, require an `HF_TOKEN`, or need a GPU.
 
-The active work on `experiment/boolq-cbpside-beta1` performs one complete 138D
-BoolQ run with exploration scaled to the number of eligible online samples.
-CBPSide uses empirical scale 0.25 and cap 0.5, ETC uses
-`ceil(n^(2/3))` forced tastes, and IGW uses `gamma=sqrt(n)`. The real routing
-target is cached weak/strong disagreement. A separate synthetic-label positive
-control is available for implementation sanity checks; it must not be
-interpreted as real benchmark routing performance.
+The active work on `experiment/boolq-cbpside-beta1` performs a complete 138D
+BoolQ robustness study over ten independently shuffled online orders. CBPSide
+uses empirical scale 0.5 and cap 0.5, ETC uses `ceil(n^(2/3))` forced tastes,
+and IGW uses `gamma=sqrt(n)`. CBPSide and IGW batch adaptive model refits after
+every five additional tastes. The real routing target is cached weak/strong
+disagreement. A separate synthetic-label positive control is available for
+implementation sanity checks; it must not be interpreted as real benchmark
+routing performance. A separate resumable multiplier tuner is now available
+for the next 20-order study. It adds a protocol-matched IGW Linear policy beside
+nonlinear IGW Tree and reports both separately tuned and matched-gamma views,
+without altering the established simulator.
 
 For experiment history and conclusions, read [EXPERIMENTS.md](EXPERIMENTS.md).
 For module boundaries and data flow, read [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -77,14 +81,25 @@ python -m pip install -e ".[test]"
 python -m pytest -q
 ```
 
-## Active BoolQ sample-size-scaled experiment
+To include the optional incremental River tree used by the tuning sensitivity
+study, install both extras instead:
+
+```powershell
+python -m pip install -e ".[test,online-tree]"
+python -m pytest -q
+```
+
+## Active BoolQ shuffled-order experiment
 
 The next experiment selects all complete blocks through
 `manifest.context_blocks`: 10 uncertainty features, 64 hidden-state PCA
 components, and 64 prompt-embedding PCA components, for 138 dimensions. With
 all 12,648 eligible samples, the sample-size rules resolve to ETC taste budget
 543 and IGW gamma 112.463327356076. Explicit command-line values still override
-these derived defaults.
+these derived defaults. Every method and loss value receives the same
+permutation within an order run. The policy seed stays fixed, so variation
+across runs measures sensitivity to arrival order rather than a separate model
+seed study.
 
 ```powershell
 simulate-llm-routing `
@@ -92,18 +107,246 @@ simulate-llm-routing `
   --context-profile all-features `
   --outcome-source cached `
   --experiment all `
-  --l01-values 1.8182 1.9149 2.0225 2.1429 2.2785 2.4324 2.6087 2.8125 3.0508 3.3333 `
+  --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
   --hgb-max-leaf-nodes 15 `
   --cbpside-matrix-regularization 1 `
-  --cbpside-beta-scale 0.25 `
+  --cbpside-beta-scale 0.5 `
   --cbpside-max-confidence-radius 0.5 `
-  --output-dir .\boolq-all-features-138-scaled-exploration-results
+  --online-refit-every-tastes 5 `
+  --online-order-repeats 10 `
+  --online-trajectory-mode none `
+  --output-dir .\boolq-all-features-138-order10-beta05-refit5-results
 ```
 
 The context-profile default remains `non-prompt`, so this all-feature run names
-`--context-profile all-features` explicitly. The default loss values are the
-same four-decimal values used in the earlier BoolQ runs. Block positions and
-order are always read from `manifest.json`; no column offsets are hardcoded.
+`--context-profile all-features` explicitly. The new loss grid uses short,
+ascending decimal values over essentially the same range as the earlier
+alpha-derived grid. Block positions and order are always read from
+`manifest.json`; no column offsets are hardcoded.
+
+## Pointwise multiplier tuning study
+
+The separate `tune-llm-routing` entry point performs the planned large sweep;
+the equivalent module form is `python -m llm_routing_simulation.tuning`. It
+uses all 138 BoolQ features discovered from `manifest.context_blocks`, cached
+weak/strong disagreement, and all 12,648 eligible rows unless `--limit` is
+given. It does not run the supervised skyline.
+
+For every policy and every ascending loss value
+`l01 = 1.8, 2.0, 2.2, 2.4, 2.6, 2.8, 3.0, 3.2, 3.3`, the tuner compares
+multipliers `0.1, 0.3, 1, 3, 10` on the same 20 shuffled orders:
+
+| Policy | Base parameter | Multiplier rule |
+|---|---:|---|
+| CBPSide | beta scale 0.5 | `beta(x_t) = min((0.5 * multiplier) * sqrt(x_t^T V^-1 x_t), 0.5)`; the cap stays 0.5 |
+| IGW Tree | `gamma=sqrt(n)` | `gamma = multiplier * sqrt(n)` with a nonlinear HGB probability estimator |
+| IGW Linear | `gamma=sqrt(n)` | The identical gamma candidate and IGW rule, with only the estimator changed to linear logistic |
+| ETC | `n^(2/3)` tastes | `tastes = ceil(multiplier * n^(2/3))`, bounded to the online horizon |
+
+The 20 order seeds are paired across policies, losses, and multipliers. Model
+snapshots change immediately before global rounds `t=1,2,4,8,...` and use only
+feedback through `t-1`. CBPSide freezes `theta_hat` and `V^-1` within each
+epoch, while its context-dependent beta is still evaluated for every current
+`x_t`. IGW Tree refits the default HGB on its complete revealed history at each
+eligible boundary; IGW Linear refits a revealed-history weighted
+`StandardScaler` plus IPS-weighted L2 logistic model (`C=1`, `lbfgs`) on its
+own revealed rows at the same boundaries. This affine preprocessing preserves
+a linear decision surface. Both IGW variants use the same 138 features, gamma
+candidate, policy random numbers, selective-feedback protocol, doubling
+schedule, and capped inverse-propensity-weighting rule. At a fixed gamma, the
+probability estimator is the only configured difference. It is not the only
+realized difference: once their actions diverge, each policy observes its own
+feedback rows and computes its own propensities and IPS weights. ETC fits once
+for each order/multiplier pair and reuses the same fitted probabilities across
+every `l01`, which avoids redundant fits.
+
+For each policy/`l01` pair, the selected multiplier minimizes mean realized
+total cost over the 20 orders. In particular, IGW Tree and IGW Linear select
+their gamma multipliers independently. Their selected comparison is therefore
+best-vs-best and the two selected gammas can differ; it is not a matched-gamma
+estimator-only contrast. Separate matched-gamma exports compare the estimators
+at each common multiplier. Even there, action-dependent feedback histories can
+diverge. Ties prefer the multiplier closest to 1 and then the smaller
+multiplier. The figures show mean plus or minus one sample SD.
+Because the same 20 orders are used to select and display the winner, this is
+an exploratory, optimistic oracle envelope. A later confirmatory study should
+evaluate preselected multipliers on fresh order seeds.
+
+### Full HGB sweep
+
+HGB with 15 maximum leaves remains the default so this sweep is directly
+comparable with the established routing experiments and remains the nonlinear
+primary for IGW Tree. The same run also evaluates IGW Linear automatically.
+Across CBPSide, ETC, IGW Tree, and IGW Linear, the full design produces 3,600
+learned candidate rows (`4 * 9 * 5 * 20`) before adding analytic Random. The
+base gamma and ETC taste count are intentionally omitted below so they are
+derived from the eligible online horizon.
+
+```powershell
+.\.venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-linear-results `
+  --context-profile all-features `
+  --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
+  --multipliers 0.1 0.3 1 3 10 `
+  --online-order-repeats 20 `
+  --cbpside-base-beta-scale 0.5 `
+  --cbpside-max-confidence-radius 0.5 `
+  --igw-mu 2 `
+  --tree-estimator hgb `
+  --hgb-max-leaf-nodes 15 `
+  --jobs 4 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+Adding IGW Linear adds 900 full trajectories (`9 * 5 * 20`) to the HGB sweep.
+At eligible doubling boundaries, each linear trajectory refits both a weighted
+`StandardScaler` and an IPS-weighted `lbfgs` logistic model on its complete
+revealed history. The full run will therefore take materially longer than the
+earlier three-policy design. Use the new `hgb-linear` output directory shown
+above; an older three-policy output has a different configuration fingerprint
+and cannot be mixed with this run. Once started, rerun the identical command to
+resume its completed candidate checkpoints.
+
+Each completed policy/`l01`/multiplier/order candidate is saved atomically.
+If the run is interrupted, repeat the exact command above with the same output
+directory; complete checkpoints are skipped. Do not change a scientific option
+when resuming because the output directory is protected by a configuration
+fingerprint.
+
+To estimate HGB-plus-linear runtime before committing to the full sweep, use
+this reduced execution pilot in its own output directory. It is an execution
+check, not a research result, and implementation work does not run it:
+
+```powershell
+.\.venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-linear-pilot `
+  --context-profile all-features `
+  --limit 500 `
+  --l01-values 1.8 2.6 3.3 `
+  --multipliers 0.3 1 3 `
+  --online-order-repeats 2 `
+  --tree-estimator hgb `
+  --hgb-max-leaf-nodes 15 `
+  --jobs 1 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+After all checkpoints exist, tables and figures can be rebuilt without running
+any policy again:
+
+```powershell
+.\.venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-linear-results `
+  --context-profile all-features `
+  --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
+  --multipliers 0.1 0.3 1 3 10 `
+  --online-order-repeats 20 `
+  --cbpside-base-beta-scale 0.5 `
+  --cbpside-max-confidence-radius 0.5 `
+  --igw-mu 2 `
+  --tree-estimator hgb `
+  --hgb-max-leaf-nodes 15 `
+  --seed 0 `
+  --policy-seed 0 `
+  --plot-only
+```
+
+### Optional River Hoeffding-tree sensitivity
+
+`river-hoeffding` is an explicitly different tree-family sensitivity check,
+not a drop-in speed claim. It replaces HGB for ETC and IGW Tree, uses River
+0.21.2, accepts IGW inverse-propensity sample weights, and defaults to maximum
+depth 4 with grace period 200. IGW Linear remains linear logistic, so its
+comparison changes neither estimator nor tuning settings in the River run. A
+Mondrian forest is not included because its River update API does not accept
+the required per-example weights.
+
+First measure correctness and runtime on this non-scientific pilot:
+
+```powershell
+.\.venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-138d-multiplier-sweep-river-linear-pilot `
+  --context-profile all-features `
+  --limit 500 `
+  --l01-values 1.8 2.6 3.3 `
+  --multipliers 0.3 1 3 `
+  --online-order-repeats 2 `
+  --tree-estimator river-hoeffding `
+  --river-max-depth 4 `
+  --river-grace-period 200 `
+  --jobs 1 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+If that pilot is satisfactory, run the complete River sensitivity study in a
+new output directory:
+
+```powershell
+.\.venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-138d-multiplier-sweep-river-linear-results `
+  --context-profile all-features `
+  --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
+  --multipliers 0.1 0.3 1 3 10 `
+  --online-order-repeats 20 `
+  --cbpside-base-beta-scale 0.5 `
+  --cbpside-max-confidence-radius 0.5 `
+  --igw-mu 2 `
+  --tree-estimator river-hoeffding `
+  --river-max-depth 4 `
+  --river-grace-period 200 `
+  --jobs 4 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+River IGW Tree receives buffered weighted tastes only at the same global
+doubling boundaries, so its predictions remain frozen within each epoch. IGW
+Linear uses its matching full-history refit at those boundaries. Rerun the same
+command to resume, or add `--plot-only` after completion while keeping all
+scientific options unchanged.
+
+### Multiplier-sweep outputs
+
+| File | Contents |
+|---|---|
+| `sweep_manifest.json` | Complete design, derived bases, epoch semantics, data fingerprint, and selection warning |
+| `checkpoints/` | Atomic candidate-level rows used for interruption-safe resume |
+| `online_order_permutations.npz` | The exact 20 paired permutations and seeds |
+| `candidate_results_by_order.csv/json` | All 3,600 learned policy/loss/multiplier/order results |
+| `candidate_results.csv/json` | Candidate means, sample SDs, and standard errors |
+| `selected_multipliers.csv/json` | Pointwise winning multiplier and effective parameter, including separate IGW Tree and IGW Linear choices |
+| `selected_results_by_order.csv/json` | Selected policy rows plus analytic Random matched to selected ETC traffic |
+| `selected_results.csv/json` | Final across-order summaries used for plots |
+| `igw_tree_vs_linear_by_order.csv/json` | Separately tuned best-vs-best IGW differences on each paired order; selected gammas may differ |
+| `igw_tree_vs_linear.csv/json` | Across-order mean, SD, and SEM for that separately tuned comparison |
+| `igw_tree_vs_linear_matched_by_order.csv/json` | Tree-versus-linear differences at each common gamma multiplier and paired order |
+| `igw_tree_vs_linear_matched.csv/json` | Across-order matched-gamma means, SDs, and SEMs by `l01` and multiplier |
+| `selected_routing_accuracy.png` | CBPSide, ETC, IGW Tree, IGW Linear, and Random routing rate versus cached-strong-reference accuracy with order-SD bars |
+| `selected_cost_vs_l01.png` | The same five curves' selected realized total cost versus ascending `l01` with order-SD bars |
+| `selected_multiplier_vs_l01.png` | Selected multiplier at each policy/loss point |
+| `igw_tree_vs_linear_cost_difference.png` | Separately tuned best-vs-best `linear cost - tree cost`; positive values favor IGW Tree |
+| `igw_tree_vs_linear_matched_cost_difference.png` | Matched-gamma `linear cost - tree cost` for all five common multipliers |
+| `summary.json` | Compact selected results, both IGW comparisons, and oracle-selection warning |
+| `multiplier-sweep-results.zip` | Portable top-level tables, figures, manifest, and summary |
+
+The bundle contains five figures: three selected-policy plots, the separately
+tuned IGW cost-difference plot, and the matched-gamma IGW cost-difference plot.
+The matched-gamma files isolate the configured estimator choice more directly,
+but they do not force the two policies to take the same actions or observe the
+same feedback.
+
+Random is calculated analytically only after ETC selection; there is no inner
+`--random-repeats` loop in this tuner, and adding IGW Linear does not change the
+Random construction. The checkpoint directory is retained for resume but is
+not copied into the portable ZIP.
 
 For a quick installation check, run only the supervised path on a prefix:
 
@@ -126,8 +369,8 @@ results.
 | Policy | Probability model | Exploration and fitting |
 |---|---|---|
 | ETC | HGB with 15 maximum leaves | Route the first `ceil(n^(2/3))` rounds, fit once, then freeze |
-| IGW | Online-refitted 15-leaf HGB | `gamma=sqrt(n)`, `mu=2`, no forced tastes or class bootstrap |
-| CBPSide | Regularized linear logistic regression | No forced tastes or class bootstrap; confidence-based routing |
+| IGW | Online-refitted 15-leaf HGB | `gamma=sqrt(n)`, `mu=2`, no forced tastes or class bootstrap; refit after every five additional tastes |
+| CBPSide | Regularized linear logistic regression | No forced tastes or class bootstrap; confidence-based routing; refit after every five additional tastes |
 | Random | No model | Matched separately to each ETC profile's realized traffic |
 
 HGB uses 15 maximum leaves, 50 boosting iterations, learning rate 0.05, minimum
@@ -135,21 +378,27 @@ leaf size 20, L2 regularization 1.0, and no early stopping. IGW
 inverse-propensity weights are capped at 10. A common base seed is used across
 loss thresholds.
 
-The online implementations cache append-only revealed history. CBPSide refits
-its logistic coefficients and updates its design matrix only after a newly
-revealed taste; action-0 rounds reuse the previous fitted state. IGW likewise
-refits HGB only after a new taste, while ETC fits once after its derived taste
-budget and remains frozen. Predictions are still made sequentially on every
-context.
+The online implementations cache append-only revealed history. CBPSide fits its
+logistic coefficients after the first taste and then only when five additional
+tastes have accumulated. Its design matrix `V` still incorporates every taste
+immediately, preserving the confidence-radius definition. IGW fits HGB as soon
+as both classes have at least two revealed labels, then waits for five
+additional tastes between refits. Each batched refit uses all revealed tastes,
+so no feedback is dropped; predictions between refits use a model that is at
+most four tastes behind. Action-0 rounds never trigger a refit. ETC still fits
+once after its derived taste budget and remains frozen. Predictions and routing
+decisions remain sequential on every context. Override the shared adaptive
+cadence with `--online-refit-every-tastes`; it does not affect ETC or the
+supervised skyline.
 
-The loss grid contains ten evenly spaced decision thresholds:
+The loss grid is plotted in ascending `l01` order:
 
 ```text
-alpha = 0.5500, 0.5222, 0.4944, 0.4667, 0.4389,
-        0.4111, 0.3833, 0.3556, 0.3278, 0.3000
+l01 = 1.8, 2.0, 2.2, 2.4, 2.6, 2.8, 3.0, 3.2, 3.3
 ```
 
-Because `l11=1`, the simulator uses `l01=1/alpha`.
+Because `l11=1`, the corresponding decision threshold remains `alpha=1/l01`;
+alpha is retained in CSV/JSON output but is no longer the cost plot's x-axis.
 
 ### CBPSide confidence scaling
 
@@ -159,10 +408,10 @@ confidence radius is:
 
 ```text
 leverage = sqrt(x^T V^-1 x)
-radius = min(0.25 * leverage, 0.5)
+radius = min(0.5 * leverage, 0.5)
 ```
 
-Here `lambda=1`, the empirical scale is 0.25, and the final radius is capped at
+Here `lambda=1`, the empirical scale is 0.5, and the final radius is capped at
 0.5. This is a heuristic confidence rule, not the full Proposition 1 bound.
 The theoretical-bound variant was retired from the active run because it hit
 the 0.5 cap on every decision in the 142D ARC experiment.
@@ -174,9 +423,10 @@ These are separate evaluations:
 - `--experiment skyline` makes one stratified 80/20 train-validation split. It
   fits logistic and the 15-leaf HGB on the training 80% and evaluates
   only validation predictions.
-- `--experiment online` sends all 12,648 eligible BoolQ samples sequentially to ETC,
-  IGW, and CBPSide. There is no supervised pretraining subset, and action 0
-  hides its outcome from the player.
+- `--experiment online` sends all 12,648 eligible BoolQ samples sequentially to
+  ETC, IGW, and CBPSide for each requested online ordering. There is no
+  supervised pretraining subset, and action 0 hides its outcome from the
+  player.
 - `--experiment all` runs both evaluations against the same selected outcome
   source.
 
@@ -191,18 +441,27 @@ The requested output directory contains:
 | File | Contents |
 |---|---|
 | `summary.json` | Cache identity, feature block, parameters, loss grid, and skyline summary |
-| `online_results.csv/json` | Per-policy routing rate, accuracy, realized total/per-example cost, and model-refit count at every loss point |
-| `online_trajectories.jsonl` | Round-level actions, revealed feedback, predictions, and diagnostics |
+| `online_results.csv/json` | Across-order means, sample SDs, and standard errors for each policy and loss point |
+| `online_results_by_order.csv/json` | One reusable summary row per order, policy, and loss point |
+| `online_order_permutations.npz` | Exact row-index permutations and seeds used by the repeated online study |
+| `online_trajectories.jsonl` | Optional round-level diagnostics when trajectory mode is `first` or `all` |
 | `supervised_model_comparison.csv/json` | Holdout AUC, log loss, Brier score, ECE, and model settings |
 | `supervised_skyline.csv/json` | Threshold-level supervised routing curves |
 | `supervised_holdout_predictions.csv` | Validation outcomes and model probabilities |
 | `routing_comparison.png` | Separate online-routing and supervised-skyline panels |
-| `online_routing_accuracy.png` | Standalone online strong-routing-rate versus accuracy comparison |
-| `online_cost_vs_alpha.png` | All online policies' realized total cost versus alpha, with `alpha=1/l01` noted |
+| `online_routing_accuracy.png` | Mean routing rate versus accuracy, with horizontal and vertical order-SD bars |
+| `online_cost_vs_l01.png` | Mean realized total cost versus ascending `l01`, with order-SD bars |
 | `simulation-results.zip` | Portable bundle of the generated outputs |
 
 Result directories and result ZIPs are ignored by Git. The source cache is the
 one explicit ZIP exception.
+
+`--random-repeats 100` remains an inner Monte Carlo average for the Random
+baseline within each online order. It is distinct from the ten outer shuffled
+orders used for the plotted error bars. Detailed 138D trajectories are disabled
+in the active command because saving them for all ten orders would create a
+multi-gigabyte artifact; the compact per-order tables retain everything needed
+to restyle the requested plots.
 
 ## Synthetic positive control
 
@@ -250,6 +509,11 @@ implementation responsibilities are summarized in
 - `src/llm_routing_simulation/algorithm.py`: ETC, IGW, and CBPSide policies.
 - `src/llm_routing_simulation/skyline.py`: supervised models and skylines.
 - `src/llm_routing_simulation/run.py`: command-line orchestration and outputs.
+- `src/llm_routing_simulation/online_tree.py`: HGB, weighted standardized
+  logistic, and optional weighted River Hoeffding probability backends.
+- `src/llm_routing_simulation/tuning.py`: resumable pointwise multiplier sweep,
+  matched IGW Tree/IGW Linear comparison, selection, analytic Random baseline,
+  and final plots.
 - `src/llm_routing_simulation/synthetic_prompt.py`: synthetic-label positive
   control.
 

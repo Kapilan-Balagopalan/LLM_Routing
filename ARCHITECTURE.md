@@ -17,11 +17,27 @@ boolq-routing-cache-full.zip
     -> run.py finds requested feature blocks from manifest context_blocks
     -> run.py selects prompt-only, non-prompt, uncertainty-prompt, or all-feature context
     -> run.py selects cached disagreement or the optional synthetic positive control
+    -> run.py creates paired online-order permutations when repeats are requested
     -> environment.py emits the current context and weak answer
     -> player.py defines the act-then-update protocol
     -> algorithm.py chooses action 0 or 1 from revealed history
     -> environment.py reveals the active outcome only when action 1 was selected
-    -> run.py records trajectories, metrics, tables, and plots
+    -> run.py aggregates per-order metrics, tables, and plots
+```
+
+The much larger pointwise multiplier study has a separate orchestration path so
+the established single-configuration simulator remains stable:
+
+```text
+boolq-routing-cache-full.zip
+    -> tuning.py selects all manifest-defined context blocks and cached disagreement
+    -> tuning.py creates 20 paired shuffled orders
+    -> tuning.py evaluates CBPSide, ETC, IGW Tree, and IGW Linear candidates
+    -> online_tree.py supplies batch HGB, batch logistic, or incremental Hoeffding estimators
+    -> tuning.py checkpoints every completed policy/l01/multiplier/order candidate
+    -> tuning.py selects the lowest-mean-cost multiplier at each policy/l01 point
+    -> tuning.py adds analytic Random matched to the selected ETC traffic
+    -> tuning.py writes reusable tables, figures, and a ZIP bundle
 ```
 
 At round `t`, a player receives only the current context. It selects:
@@ -97,16 +113,19 @@ It checks that updates correspond to the pending action and context.
   15 maximum leaves per boosting tree.
 - `LogCBPSideATPlayer`: estimates a regularized linear logistic disagreement
   model and applies the restored empirical Mahalanobis-leverage confidence
-  radius without forced tastes. The active scale is 0.25 and the final radius
+  radius without forced tastes. The active scale is 0.5 and the final radius
   is capped at 0.5. The player incrementally caches revealed feature rows and
-  `V`; it refits from the same zero initialization only after a new taste.
+  updates `V` after every taste. It fits from the same zero initialization after
+  the first taste and then after each batch of five additional tastes.
 - `IGWPlayer`: estimates disagreement using an online-refitted histogram
   gradient boosting classifier and samples an arm using inverse-gap weighting.
   The active study uses `mu=2`, `gamma=sqrt(n)` (112.463327356076 at
-  `n=12,648`), and the same 15-leaf HGB profile as ETC.
+  `n=12,648`), the same 15-leaf HGB profile as ETC, and five-taste refit
+  batches after its first feasible fit.
 - `RevealedFeedbackEstimator`: extracts only action-1 observations and applies
   capped inverse-propensity weights when supplied. It processes only newly
-  appended history rows, so HGB is not refit or rebuilt after action-0 rounds.
+  appended history rows. Batched refits use the complete cached revealed
+  history, while action-0 rounds neither add a taste nor trigger a refit.
 
 CBPSide and IGW have no forced tastes or hidden class bootstrap. Before enough
 revealed observations exist to fit both classes, their estimators return a
@@ -137,13 +156,86 @@ cross-validated model-comparison functions used by earlier branches.
 ### `run.py`
 
 The `simulate-llm-routing` entry point selects a manifest-defined context
-profile and runs online experiments, supervised skylines, or both. It writes
-reproducibility metadata, per-method summaries,
-optional synthetic outcome metadata, validation predictions, full online
-trajectories, per-policy realized costs, routing-rate/accuracy and
-cost-versus-alpha plots, and a ZIP bundle. With no `--limit`, all 12,648 eligible
-BoolQ cache rows are online rounds. The supervised skyline remains a
-separate 4:1 train-validation task over the same selected outcome source.
+profile and runs online experiments, supervised skylines, or both. For repeated
+online studies it creates one deterministic permutation per order seed and
+reuses that exact ordering across every method and loss value. It writes raw
+per-order summaries, across-order means/SDs/standard errors, the exact compact
+permutations, optional trajectories, validation predictions,
+routing-rate/accuracy and cost-versus-l01 plots, and a ZIP bundle. With no
+`--limit`, all 12,648 eligible BoolQ cache rows are online rounds in every
+permutation. The supervised skyline runs once as a separate 4:1
+train-validation task on the canonical sample collection.
+
+### `online_tree.py`
+
+Defines the probability-estimator boundary used only by the multiplier tuner.
+The default backend is the established scikit-learn 15-leaf HGB, which refits
+from the complete revealed history. The optional `river-hoeffding` backend is a
+River 0.21.2 `HoeffdingTreeClassifier` with maximum depth 4, grace period 200,
+and weighted `learn_one` updates. The latter preserves IGW inverse-propensity
+weights and is applied to both ETC and IGW Tree so their tree family remains
+matched. The IGW Linear backend instead fits a revealed-history weighted
+`StandardScaler` followed by IPS-weighted L2 logistic regression using every
+feature. IGW Linear is unaffected by the tree-backend option. Aggregated
+Mondrian forests were not added
+because River's implementation does not accept the per-example weights required
+by this IGW estimator.
+
+### `tuning.py`
+
+The `tune-llm-routing` entry point owns the exploratory pointwise multiplier
+sweep. Its module form is `python -m llm_routing_simulation.tuning`. It uses all
+138 manifest-defined BoolQ features, the ascending `l01` grid, 20 paired order
+seeds, and multipliers `0.1, 0.3, 1, 3, 10`. The three base rules are CBPSide
+beta scale 0.5 with a separately fixed cap of 0.5, IGW `gamma=sqrt(n)`, and ETC
+`n^(2/3)` tastes with `ceil(multiplier * base)` applied afterward.
+
+The tuner exposes two IGW curves for a controlled estimator comparison. IGW
+Tree uses the nonlinear HGB primary by default; IGW Linear uses regularized
+linear logistic regression. They share the complete 138D context, paired order,
+gamma candidate, `mu`, policy random numbers, cold-start rule, doubling
+schedule, and capped inverse-propensity-weighting rule. At matched gamma, only
+the configured probability estimator differs. Their realized actions can
+diverge, however, so they need not reveal the same feedback rows or realize the
+same propensities and IPS weights. The complete design contains 3,600 learned
+candidate rows: four policies times nine losses times five multipliers times 20
+orders.
+
+Adaptive snapshots change only immediately before global rounds
+`t=1,2,4,8,...`, and each snapshot uses revealed feedback through `t-1`.
+CBPSide freezes both `theta_hat` and `V^-1` within an epoch but evaluates
+`min((0.5 * multiplier) * sqrt(x_t^T V^-1 x_t), 0.5)` on every current context.
+IGW Tree either refits HGB on the complete revealed history or applies the
+buffered weighted River updates at the same boundaries. IGW Linear refits its
+weighted logistic estimator on its own revealed history at those boundaries.
+ETC fits one prefix model per order and multiplier and reuses its probabilities
+across all `l01` values.
+
+Every completed policy/`l01`/multiplier/order candidate is written atomically
+under `checkpoints/`; repeating the same command skips complete candidates.
+After all candidates exist, the tuner chooses the multiplier with the lowest
+mean realized total cost separately for each policy and `l01`; IGW Tree and IGW
+Linear never share a forced winner and their winning gammas may differ. The
+`igw_tree_vs_linear_by_order.csv/json`, `igw_tree_vs_linear.csv/json`, and
+`igw_tree_vs_linear_cost_difference.png` are therefore a separately tuned
+best-vs-best comparison. The matched-gamma exports
+`igw_tree_vs_linear_matched_by_order.csv/json`,
+`igw_tree_vs_linear_matched.csv/json`, and
+`igw_tree_vs_linear_matched_cost_difference.png` pair the candidates at every
+common multiplier for a configured estimator contrast. Both views pair the
+outer online order, but neither forces identical realized feedback histories.
+Ties favor the value closest to 1 and then the smaller value. Random is computed
+analytically after ETC selection rather than by an inner Monte Carlo loop and
+is unchanged by the added comparison. The selection and plotted error bars
+reuse the same 20 orders, so these figures are an optimistic exploratory oracle
+envelope, not an unbiased evaluation of a preselected policy.
+
+Adding IGW Linear adds 900 online trajectories. Each performs complete-history
+weighted-scaler and `lbfgs` logistic refits at eligible doubling boundaries, so
+the four-policy sweep takes longer than the earlier three-policy design.
+Candidate-level checkpoints make an identical-command resume safe; a changed
+design must use a new output directory. Finalization writes five figures,
+including both the separately tuned and matched-gamma IGW cost-difference plots.
 
 ### `prompt_embeddings.py`
 
@@ -180,8 +272,17 @@ or environment interfaces.
   supervised skyline and full-stream online routing evaluation. It retains the
   multifeature forest-generated synthetic positive control.
 - `experiment/boolq-cbpside-beta1` preserves those context studies and adds a
-  complete 138D BoolQ follow-up with CBPSide scale 0.25/cap 0.5, ETC
-  `ceil(n^(2/3))` tastes, and IGW `gamma=sqrt(n)`.
+  complete 138D BoolQ follow-up with CBPSide scale 0.5/cap 0.5, ETC
+  `ceil(n^(2/3))` tastes, IGW `gamma=sqrt(n)`, and a ten-order robustness study
+  whose plots show sample variability across paired online permutations.
+  Adaptive CBPSide and IGW model fits are batched every five new tastes; ETC is
+  still fitted once and frozen. Its separate pointwise tuning path uses 20
+  paired orders, strict global-round doubling epochs, candidate-level resume,
+  matched IGW Tree and IGW Linear policies, and an optional weighted River
+  Hoeffding-tree sensitivity analysis without changing the established HGB
+  nonlinear primary. It exports both separately tuned best-vs-best and
+  fixed-multiplier matched-gamma IGW comparisons; action-dependent histories
+  may differ in either view.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather
 than inferring research intent from implementation details alone.

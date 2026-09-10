@@ -31,7 +31,7 @@ class LogCBPSideATConfig:
     loss_reject_disagreement: float = 2.0
     loss_route_disagreement: float = 1.0
     c_max: float = 3.0
-    beta_scale: float = 0.25
+    beta_scale: float = 0.5
     max_confidence_radius: float = 0.5
     theta_regularization: float = 1.0
     theta_norm_bound: float | None = None
@@ -317,12 +317,21 @@ class LogCBPSideAT:
 class LogCBPSideATPlayer(HistoryBasedPlayer):
     """Store online history and call LogCBPSideAT each round."""
 
-    def __init__(self, context_dim: int, config: LogCBPSideATConfig) -> None:
+    def __init__(
+        self,
+        context_dim: int,
+        config: LogCBPSideATConfig,
+        *,
+        refit_every_tastes: int = 1,
+    ) -> None:
         super().__init__(context_dim)
+        if refit_every_tastes < 1:
+            raise ValueError("refit_every_tastes must be positive")
         self.algorithm = LogCBPSideAT(config)
         self.min_tastes = config.min_tastes
         self.bootstrap_per_class = config.bootstrap_per_class
         self.bootstrap_max_tastes = config.bootstrap_max_tastes
+        self.refit_every_tastes = int(refit_every_tastes)
         self.last_decision: LogCBPSideATDecision | None = None
         model_dim = context_dim + 1
         self._tasted_contexts: list[np.ndarray] = []
@@ -333,6 +342,7 @@ class LogCBPSideATPlayer(HistoryBasedPlayer):
         self._fit_diagnostics = (0, 0.0, 0.0, 0.0)
         self._fit_dirty = False
         self.theta_fit_count = 0
+        self.last_model_training_count = 0
 
     def next_action(self, context: np.ndarray) -> PlayerDecision:
         if self._pending_action is not None:
@@ -340,13 +350,20 @@ class LogCBPSideATPlayer(HistoryBasedPlayer):
         x = np.asarray(context, dtype=np.float64).reshape(-1)
         if x.size != self.context_dim:
             raise ValueError(f"Expected context dimension {self.context_dim}")
-        if self._fit_dirty:
+        tastes_since_fit = (
+            len(self._tasted_outcomes) - self.last_model_training_count
+        )
+        if self._fit_dirty and (
+            self.theta_fit_count == 0
+            or tastes_since_fit >= self.refit_every_tastes
+        ):
             self._theta, self._fit_diagnostics = self.algorithm._estimate_theta(
                 self._tasted_contexts,
                 self._tasted_outcomes,
                 self.context_dim + 1,
             )
             self.theta_fit_count += 1
+            self.last_model_training_count = len(self._tasted_outcomes)
             self._fit_dirty = False
         decision = self.algorithm._decision_from_state(
             x,
@@ -395,10 +412,14 @@ class RevealedFeedbackEstimator:
         context_dim: int,
         *,
         max_features: int | None = None,
+        refit_every_tastes: int = 1,
         seed: int = 0,
     ) -> None:
+        if refit_every_tastes < 1:
+            raise ValueError("refit_every_tastes must be positive")
         self.context_dim = context_dim
         self.model_context_dim = min(context_dim, max_features or context_dim)
+        self.refit_every_tastes = int(refit_every_tastes)
         self.seed = seed
         self.model = None
         self.fitted_count = -1
@@ -558,7 +579,8 @@ class RevealedFeedbackEstimator:
             return float(probability), tasted_count, False, classes
 
         should_fit = self.model is None or (
-            not freeze_after_fit and tasted_count != self.fitted_count
+            not freeze_after_fit
+            and tasted_count - self.fitted_count >= self.refit_every_tastes
         )
         if should_fit:
             self.model = self._new_model()
@@ -583,9 +605,15 @@ class HGBEstimator(RevealedFeedbackEstimator):
         *,
         max_features: int | None = None,
         max_leaf_nodes: int = ONLINE_HGB_PROFILE["max_leaf_nodes"],
+        refit_every_tastes: int = 1,
         seed: int = 0,
     ) -> None:
-        super().__init__(context_dim, max_features=max_features, seed=seed)
+        super().__init__(
+            context_dim,
+            max_features=max_features,
+            refit_every_tastes=refit_every_tastes,
+            seed=seed,
+        )
         if max_leaf_nodes < 2:
             raise ValueError("HGB max_leaf_nodes must be at least two")
         self.max_leaf_nodes = int(max_leaf_nodes)
@@ -723,6 +751,7 @@ class IGWPlayer(HistoryBasedPlayer):
         min_propensity: float = 0.1,
         estimator_max_features: int | None = None,
         hgb_max_leaf_nodes: int = ONLINE_HGB_PROFILE["max_leaf_nodes"],
+        refit_every_tastes: int = 1,
         seed: int = 0,
     ) -> None:
         super().__init__(context_dim)
@@ -735,15 +764,18 @@ class IGWPlayer(HistoryBasedPlayer):
             or gamma_multiplier <= 0
             or (fixed_gamma is not None and fixed_gamma <= 0)
             or not 0 < min_propensity <= 1
+            or refit_every_tastes < 1
         ):
             raise ValueError(
                 "IGW requires N>0, min_tastes>=0, mu>=2, positive gamma, "
-                "nonnegative bootstrap settings, and min propensity in (0,1]"
+                "nonnegative bootstrap settings, positive refit interval, "
+                "and min propensity in (0,1]"
             )
         self.estimator = HGBEstimator(
             context_dim,
             max_features=estimator_max_features,
             max_leaf_nodes=hgb_max_leaf_nodes,
+            refit_every_tastes=refit_every_tastes,
             seed=seed,
         )
         self.config = config
@@ -755,6 +787,7 @@ class IGWPlayer(HistoryBasedPlayer):
         self.gamma_multiplier = gamma_multiplier
         self.fixed_gamma = fixed_gamma
         self.min_propensity = min_propensity
+        self.refit_every_tastes = int(refit_every_tastes)
         self.rng = np.random.default_rng(seed)
         self.action1_probabilities: list[float] = []
         self._pending_probability_1: float | None = None
