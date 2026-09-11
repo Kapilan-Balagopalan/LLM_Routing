@@ -711,6 +711,13 @@ result bundle is inspected.
 
 Branch: `experiment/boolq-cbpside-beta1`
 
+Historical status: this four-policy, doubling-boundary revision-3 study was
+completed, producing all 3,600 candidate checkpoints and finalized artifacts.
+Its numerical results were not analyzed during the later revision-5 code-change
+turn. The original design and command are retained here unchanged as archival
+provenance. Current revision-5 code cannot resume or plot-only its fingerprinted
+output directory; use the original revision-3 code for those artifacts.
+
 Research question: after controlling arrival-order variation, what pointwise
 scale of each policy's exploration parameter minimizes realized total cost at
 each `l01`, and how much of IGW's result comes from its routing rule versus its
@@ -782,7 +789,7 @@ longer than the earlier three-policy implementation. Use the new
 there can resume from candidate checkpoints, while an older three-policy output
 directory cannot be mixed with this revised fingerprint.
 
-Planned primary command:
+Archival revision-3 primary command:
 
 ```powershell
 .\.venv\Scripts\python.exe -m llm_routing_simulation.tuning `
@@ -821,11 +828,13 @@ run during implementation:
   --policy-seed 0
 ```
 
-The separately installed `tune-llm-routing` console command invokes the same
-module. Rerun the exact command to resume. Once all checkpoints exist, append
-`--plot-only` with every other scientific option unchanged to rebuild only the
-tables, five figures, summary, and ZIP. The primary command
-evaluates both IGW Tree and IGW Linear automatically.
+In the original revision-3 environment, the separately installed
+`tune-llm-routing` console command invoked the same module, the exact command
+could resume missing checkpoints, and appending `--plot-only` with every other
+scientific option unchanged rebuilt the tables, five figures, summary, and ZIP.
+Those instructions are archival and require revision-3 code; current
+revision-5 code has a different fingerprint and five-policy design. The
+revision-3 primary command evaluated both IGW Tree and IGW Linear automatically.
 
 Optional model-family sensitivity: install
 `python -m pip install -e ".[test,online-tree]"` and choose
@@ -869,11 +878,262 @@ comparison can use different selected gammas; the matched-gamma comparison
 holds the configured gamma fixed but still allows action-dependent histories
 and realized IPS weights to diverge. `summary.json` and
 `multiplier-sweep-results.zip` retain both comparisons. The `checkpoints/`
-directory remains beside the bundle for resume. Implementation and verification
-work must not execute the full experiment; the user will run it.
+directory remains beside the bundle for revision-3 resume. The completed
+revision-3 artifacts are retained for provenance. Their numerical results were
+not analyzed or added as conclusions during the later revision-5 code-change
+turn.
 
-No numerical conclusion is recorded until the user runs the study and the
-result bundle is inspected.
+### BoolQ 138D Fibonacci and ETC-linear tuning revision, 2026-09-11
+
+Branch: `experiment/boolq-cbpside-beta1`
+
+Historical status: the revision-4 Fibonacci study was implemented and completed,
+producing all 4,500 candidate checkpoints and finalized artifacts. Its numerical
+results were not analyzed during the later revision-5 code-change turn. This
+entry superseded the revision-3 design while preserving that earlier
+four-policy, doubling-boundary record above.
+
+The scientific inputs remain unchanged: all 12,648 eligible BoolQ rows, all
+138 manifest-defined features, cached weak/strong disagreement, cached strong
+answers as the routing reference, nine ascending `l01` values, five
+multipliers, 20 paired shuffled orders, policy seed 0, CBPSide base scale 0.5
+with cap 0.5, IGW base `gamma=sqrt(n)` with `mu=2`, ETC base `n^(2/3)`, capped
+IGW inverse-propensity weights, and the fixed 15-leaf HGB profile.
+
+Two changes define this revision:
+
+- CBPSide, IGW Tree, and IGW Linear now default to adaptive estimator snapshots
+  immediately before Fibonacci global-round boundaries `1,2,3,5,8,...`. A fit
+  before boundary `b` may use revealed feedback only through round `b-1`; the
+  policy is nevertheless evaluated on every round. The explicit
+  `--adaptive-update-schedule doubling` option retains the historical
+  `1,2,4,8,...` boundary rule. Neither ETC policy is affected by this option.
+- ETCLinear is added beside ETC HGB. For each order and taste multiplier, the
+  two receive the identical shuffled order, forced prefix, taste budget, and
+  unit training weights. ETC HGB always uses the fixed 15-leaf HGB estimator;
+  ETCLinear uses the weighted `StandardScaler` plus L2 logistic estimator.
+  When that prefix contains at least two rows from each class, each fits once,
+  freezes, and reuses its probability vector across all nine `l01` values. If
+  the feasibility gate fails, neither model is fit and the candidate instead
+  uses the Laplace-smoothed prefix prevalence as its constant tail probability;
+  the saved row records this fallback and its two prefix class counts. They
+  tune and select the taste multiplier independently at each `l01`. Random
+  remains matched only to selected ETC HGB traffic, not to
+  ETCLinear. The `--tree-estimator river-hoeffding` sensitivity changes IGW
+  Tree only; it does not change either ETC estimator.
+
+The complete design now contains 4,500 learned candidate rows:
+`5 policies * 9 l01 values * 5 multipliers * 20 orders`. The five selected
+learned policies are CBPSide, ETC HGB, ETCLinear, IGW Tree, and IGW Linear;
+analytic Random is the sixth selected curve.
+
+For `n=12,648`, doubling has 14 boundaries including round 1 and therefore at
+most 13 adaptive refits after feedback exists. Fibonacci has 20 such boundaries
+and at most 19 adaptive refits. Summing the full-history sizes available at
+these refit points gives 28,635 versus 16,369 round-equivalents, approximately
+`1.75x` as much repeated full-history fit work. In exchange, the final epoch's
+potentially stale tail falls from 4,457 rounds after the doubling boundary
+8,192 to 1,703 rounds after the Fibonacci boundary 10,946. These are schedule
+upper bounds; a candidate can fit fewer times when no new taste has arrived or
+the estimator is not yet feasible.
+
+Archival revision-4 primary command:
+
+```powershell
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-fibonacci-results `
+  --context-profile all-features `
+  --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
+  --multipliers 0.1 0.3 1 3 10 `
+  --online-order-repeats 20 `
+  --adaptive-update-schedule fibonacci `
+  --cbpside-base-beta-scale 0.5 `
+  --cbpside-max-confidence-radius 0.5 `
+  --igw-mu 2 `
+  --tree-estimator hgb `
+  --hgb-max-leaf-nodes 15 `
+  --jobs 4 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+The explicit Fibonacci option keeps this now-superseded revision-4 command
+self-describing. The completed directory has a revision-4 configuration
+fingerprint. Resume and `--plot-only` for those artifacts require the original
+revision-4 code plus the exact same scientific options and output directory;
+current revision-5 code will reject that directory. Selecting
+`--adaptive-update-schedule fibonacci` or `doubling` under revision 5 starts a
+new five-policy revision-5 configuration and does not reproduce the revision-3
+four-policy output. No numerical-result analysis of the completed Fibonacci
+artifacts was performed during the later revision-5 code-change turn.
+
+### BoolQ 138D capped-doubling gap-500 tuning result, 2026-09-11
+
+Branch: `experiment/boolq-cbpside-beta1`
+
+Historical status: the revision-5 gap-500 study completed all 4,500 candidate
+checkpoints and finalized its tables, figures, summary, and ZIP bundle. Its
+numerical results were not analyzed during the subsequent gap-100 code-change
+turn. This entry superseded the completed Fibonacci revision above while
+preserving that revision-4 study and its original artifacts.
+
+This completed configuration changed only the adaptive estimator-update
+schedule. All other inputs remained unchanged: 12,648 eligible BoolQ rows,
+all 138 manifest-defined
+features, cached weak/strong disagreement, cached strong answers as the routing
+reference, nine ascending `l01` values, five multipliers, 20 paired shuffled
+orders, policy seed 0, CBPSide base scale 0.5 and cap 0.5, IGW base
+`gamma=sqrt(n)` and `mu=2`, ETC base `n^(2/3)`, 15-leaf HGB, ETCLinear, IGW
+Linear, capped IGW inverse-propensity weights, pointwise independent selection,
+and Random matched only to selected ETC HGB traffic.
+
+The schedule used was `capped-doubling`. Starting with boundary `b=1`, it set
+
+```text
+next boundary = min(2*b, b + 500)
+```
+
+Thus it followed exponential doubling while the gaps were small and then
+limited consecutive boundary gaps to 500 global rounds. For this horizon the boundaries
+begin `1,2,4,8,16,32,64,128,256,512,1012,1512,...` and end at 12,512.
+Immediately before boundary `b`, an adaptive estimator may use only feedback
+revealed through round `b-1`; CBPSide and both IGW policies still make a policy
+decision on every round, and CBPSide still evaluates its context-dependent beta
+for every current context. ETC HGB and ETCLinear remain unchanged: each uses
+its forced prefix, fits once when feasible, freezes, and reuses probabilities
+across all loss values.
+
+For `n=12,648`, this capped schedule has exactly 34 boundaries including round
+1 and therefore at most 33 adaptive fits after feedback exists. The last
+boundary is 12,512, leaving a final potentially stale tail of 137 rounds when
+counted inclusively. The repeated full-history row-work upper bound for one
+adaptive trajectory is
+`sum_b (b-1) = 163,277` rows. This is `5.70x` the Fibonacci upper bound of
+28,635 and `9.97x` the pure-doubling upper bound of 16,369. In exchange, the
+final stale-tail bound improved from 1,703 rounds under Fibonacci and 4,457
+under pure doubling to 137. This is a major runtime increase across the full
+sweep. Actual model fits can be fewer when no new taste has arrived or the
+estimator is not yet feasible.
+
+Fibonacci and pure doubling remain available as explicit reproduction options:
+`--adaptive-update-schedule fibonacci` and
+`--adaptive-update-schedule doubling`. The maximum-gap option affects only
+capped doubling. The five-policy design still contains 4,500 learned candidate
+rows; changing the schedule does not alter ETC fitting, selection, outputs, or
+the analytic Random construction.
+
+Completed primary command:
+
+```powershell
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap500-results `
+  --context-profile all-features `
+  --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
+  --multipliers 0.1 0.3 1 3 10 `
+  --online-order-repeats 20 `
+  --adaptive-update-schedule capped-doubling `
+  --adaptive-max-round-gap 500 `
+  --cbpside-base-beta-scale 0.5 `
+  --cbpside-max-confidence-radius 0.5 `
+  --igw-mu 2 `
+  --tree-estimator hgb `
+  --hgb-max-leaf-nodes 15 `
+  --jobs 4 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+The explicit schedule and gap make the command self-describing. Current
+revision-5 code can resume or run `--plot-only` on these completed artifacts
+only by reusing every scientific option and this exact output directory.
+
+No numerical-result inspection was performed while changing the default from
+gap 500 to gap 100.
+
+### BoolQ 138D capped-doubling gap-100 tuning revision, 2026-09-11
+
+Branch: `experiment/boolq-cbpside-beta1`
+
+Status: implemented as the next planned configuration, but no full gap-100
+experiment has been run and no numerical result is recorded. This entry
+supersedes the completed gap-500 configuration above for the next run; all
+completed gap-500 artifacts remain preserved and usable with their exact
+revision-5 options.
+
+This revision changes only the capped-doubling maximum boundary gap from 500 to
+100 global rounds. All other inputs remain unchanged: 12,648 eligible BoolQ
+rows, all 138 manifest-defined features, cached weak/strong disagreement,
+cached strong answers as the routing reference, nine ascending `l01` values,
+five multipliers, 20 paired shuffled orders, policy seed 0, CBPSide base scale
+0.5 and cap 0.5, IGW base `gamma=sqrt(n)` and `mu=2`, ETC base `n^(2/3)`,
+15-leaf HGB, ETCLinear, IGW Linear, capped IGW inverse-propensity weights,
+pointwise independent selection, and Random matched only to selected ETC HGB
+traffic.
+
+Starting with boundary `b=1`, the default schedule now sets
+
+```text
+next boundary = min(2*b, b + 100)
+```
+
+For this horizon the boundaries begin
+`1,2,4,8,16,32,64,128,228,328,428,...` and end at 12,628. Immediately before
+boundary `b`, an adaptive estimator may use only feedback revealed through
+round `b-1`; CBPSide and both IGW policies still make a policy decision every
+round, and CBPSide still evaluates its context-dependent beta for every current
+context. ETC HGB and ETCLinear remain unchanged: each uses its forced prefix,
+fits once when feasible, freezes, and reuses probabilities across all loss
+values.
+
+For `n=12,648`, gap 100 produces exactly 133 boundaries including round 1 and
+therefore at most 132 adaptive fits after feedback exists. The last boundary is
+12,628, leaving a final potentially stale tail of 21 rounds when counted
+inclusively. The repeated full-history row-work upper bound for one adaptive
+trajectory is `sum_b (b-1) = 803,622` rows. This is `28.06x` the Fibonacci
+upper bound of 28,635, `49.09x` pure doubling's 16,369, and `4.92x` the
+gap-500 upper bound of 163,277. The shorter stale-tail bound therefore comes
+with a very large runtime increase across the complete sweep. Actual model fits
+can be fewer when no new taste has arrived or the estimator is not yet
+feasible.
+
+Fibonacci, pure doubling, and the completed gap-500 configuration remain
+available under revision 5. For gap 500, explicitly use
+`--adaptive-update-schedule capped-doubling --adaptive-max-round-gap 500` with
+the original gap-500 output directory. The five-policy design remains 4,500
+learned candidate rows; changing the adaptive gap does not alter ETC fitting,
+selection, outputs, or the analytic Random construction.
+
+Planned primary command; implementation and documentation work did not run it:
+
+```powershell
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap100-results `
+  --context-profile all-features `
+  --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
+  --multipliers 0.1 0.3 1 3 10 `
+  --online-order-repeats 20 `
+  --adaptive-update-schedule capped-doubling `
+  --adaptive-max-round-gap 100 `
+  --cbpside-base-beta-scale 0.5 `
+  --cbpside-max-confidence-radius 0.5 `
+  --igw-mu 2 `
+  --tree-estimator hgb `
+  --hgb-max-leaf-nodes 15 `
+  --jobs 4 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+The fresh gap-100 output directory is required because the maximum gap is part
+of the configuration fingerprint. Resume and `--plot-only` must reuse every
+scientific option and this exact directory. Do not point the gap-100 run at the
+completed gap-500 directory.
+
+No full sweep, pilot, or numerical-result inspection was performed for the
+gap-100 change.
 
 ### Prompt-only 20D real-label fine-grid study, 2026-09-03
 

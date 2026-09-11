@@ -37,17 +37,26 @@ from llm_routing_simulation.run import (
 
 
 DEFAULT_MULTIPLIERS = (0.1, 0.3, 1.0, 3.0, 10.0)
-TUNING_IMPLEMENTATION_REVISION = 3
+ADAPTIVE_UPDATE_SCHEDULES = ("capped-doubling", "fibonacci", "doubling")
+DEFAULT_ADAPTIVE_UPDATE_SCHEDULE = "capped-doubling"
+DEFAULT_ADAPTIVE_MAX_ROUND_GAP = 100
+TUNING_IMPLEMENTATION_REVISION = 5
 POLICY_CBPSIDE = "CBPSide"
 POLICY_ETC = "ETC"
+POLICY_ETC_LINEAR = "ETCLinear"
 POLICY_IGW_TREE = "IGW"
 POLICY_IGW_LINEAR = "IGWLinear"
 TUNED_POLICIES = (
     POLICY_CBPSIDE,
     POLICY_ETC,
+    POLICY_ETC_LINEAR,
     POLICY_IGW_LINEAR,
     POLICY_IGW_TREE,
 )
+POLICY_OUTPUT_ORDER = (*TUNED_POLICIES, "Random")
+POLICY_OUTPUT_RANK = {
+    policy: index for index, policy in enumerate(POLICY_OUTPUT_ORDER)
+}
 AGGREGATE_METRICS = (
     "routing_rate",
     "accuracy",
@@ -96,6 +105,23 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument(
+        "--adaptive-update-schedule",
+        choices=ADAPTIVE_UPDATE_SCHEDULES,
+        default=DEFAULT_ADAPTIVE_UPDATE_SCHEDULE,
+        help=(
+            "Global-round refit boundaries for CBPSide and both IGW variants; "
+            "capped doubling starts 1,2,4,8,... then limits consecutive "
+            "boundaries to --adaptive-max-round-gap; Fibonacci and pure "
+            "doubling remain available as explicit comparison schedules"
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-max-round-gap",
+        type=int,
+        default=DEFAULT_ADAPTIVE_MAX_ROUND_GAP,
+        help="Maximum boundary gap for capped doubling (default: 100 rounds)",
+    )
+    parser.add_argument(
         "--plot-only",
         action="store_true",
         help="Rebuild tables, selections, plots, and ZIP from complete checkpoints",
@@ -133,8 +159,9 @@ def _parser() -> argparse.ArgumentParser:
         default="hgb",
         help=(
             "Use the established HGB oracle or an explicitly different weighted "
-            "incremental Hoeffding tree for ETC and IGW Tree; IGW Linear is "
-            "always evaluated with weighted logistic regression"
+            "incremental Hoeffding tree for IGW Tree; ETC HGB remains fixed to "
+            "the established 15-leaf HGB oracle, while ETC Linear and IGW "
+            "Linear always use weighted logistic regression"
         ),
     )
     parser.add_argument("--hgb-max-leaf-nodes", type=int, default=15)
@@ -152,6 +179,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--jobs must be positive or -1")
     if args.jobs < -1:
         raise SystemExit("--jobs must be positive or -1")
+    if args.adaptive_max_round_gap < 1:
+        raise SystemExit("--adaptive-max-round-gap must be positive")
     if not args.l01_values or any(
         not math.isfinite(value) or value < args.l11
         for value in args.l01_values
@@ -211,12 +240,65 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("River tau must be in [0, 1]")
 
 
+def _schedule_boundaries(
+    total_samples: int,
+    schedule: str,
+    max_round_gap: int = DEFAULT_ADAPTIVE_MAX_ROUND_GAP,
+) -> Iterable[int]:
+    """Yield unique before-action boundary rounds for an adaptive schedule."""
+    if total_samples < 0:
+        raise ValueError("The online horizon must be nonnegative")
+    if schedule not in ADAPTIVE_UPDATE_SCHEDULES:
+        raise ValueError(f"Unknown adaptive update schedule: {schedule!r}")
+    if max_round_gap < 1:
+        raise ValueError("The adaptive maximum round gap must be positive")
+    if schedule in {"capped-doubling", "doubling"}:
+        boundary = 1
+        while boundary <= total_samples:
+            yield boundary
+            doubled = 2 * boundary
+            boundary = (
+                min(doubled, boundary + max_round_gap)
+                if schedule == "capped-doubling"
+                else doubled
+            )
+        return
+
+    previous, boundary = 1, 2
+    while previous <= total_samples:
+        yield previous
+        previous, boundary = boundary, previous + boundary
+
+
+def _adaptive_epochs(
+    total_samples: int,
+    schedule: str,
+    max_round_gap: int = DEFAULT_ADAPTIVE_MAX_ROUND_GAP,
+) -> Iterable[tuple[int, int, int]]:
+    """Yield `(boundary_round, start_index, stop_index)` without gaps."""
+    boundaries = list(
+        _schedule_boundaries(total_samples, schedule, max_round_gap)
+    )
+    for index, boundary in enumerate(boundaries):
+        next_boundary = (
+            boundaries[index + 1]
+            if index + 1 < len(boundaries)
+            else total_samples + 1
+        )
+        yield boundary, boundary - 1, next_boundary - 1
+
+
 def _doubling_epochs(total_samples: int) -> Iterable[tuple[int, int, int]]:
-    """Yield `(boundary_round, start_index, stop_index)` for 1,2,4,8,... ."""
-    boundary = 1
-    while boundary <= total_samples:
-        yield boundary, boundary - 1, min(total_samples, 2 * boundary - 1)
-        boundary *= 2
+    """Backward-compatible wrapper for the historical doubling schedule."""
+    return _adaptive_epochs(total_samples, "doubling")
+
+
+def _schedule_slug(schedule: str, max_round_gap: int) -> str:
+    """Return an unambiguous compact schedule label for candidate rows."""
+    normalized = schedule.replace("-", "_")
+    if schedule == "capped-doubling":
+        return f"{normalized}_gap_{max_round_gap}"
+    return normalized
 
 
 def _normalized_cbpside_features(contexts: np.ndarray) -> np.ndarray:
@@ -286,8 +368,16 @@ def _tree_settings(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _etc_hgb_settings(args: argparse.Namespace) -> dict[str, Any]:
+    """Return the fixed nonlinear ETC oracle independently of IGW options."""
+    return {
+        "kind": "hgb",
+        "hgb_max_leaf_nodes": args.hgb_max_leaf_nodes,
+    }
+
+
 def _linear_settings() -> dict[str, Any]:
-    """Return the fixed linear oracle used only by the IGW comparison."""
+    """Return the fixed linear oracle shared by the linear policy variants."""
     return {"kind": "logistic", **ONLINE_LOGISTIC_PROFILE}
 
 
@@ -312,6 +402,8 @@ def make_tree_backend(
 def _method_label(policy: str, tree_settings: dict[str, Any]) -> str:
     if policy == POLICY_CBPSIDE:
         return "CBPSide (linear logistic)"
+    if policy == POLICY_ETC_LINEAR:
+        return "ETC + linear logistic"
     if policy == POLICY_IGW_LINEAR:
         return "IGW + linear logistic"
     if tree_settings["kind"] == "hgb":
@@ -337,6 +429,7 @@ def _base_row(
     policy_seed: int,
     examples: int,
     tree_settings: dict[str, Any],
+    update_schedule: str,
 ) -> dict[str, Any]:
     return {
         "policy": policy,
@@ -353,15 +446,16 @@ def _base_row(
         "policy_seed": int(policy_seed),
         "order_was_shuffled": True,
         "examples": int(examples),
-        "update_schedule": "global_round_doubling_before_action",
+        "update_schedule": update_schedule,
         "probability_estimator": (
             "linear-logistic"
-            if policy in {POLICY_CBPSIDE, POLICY_IGW_LINEAR}
+            if policy in {POLICY_CBPSIDE, POLICY_ETC_LINEAR, POLICY_IGW_LINEAR}
             else tree_settings["kind"]
         ),
         "tree_estimator": (
             tree_settings["kind"]
-            if tree_settings["kind"] in {"hgb", "river-hoeffding"}
+            if policy in {POLICY_ETC, POLICY_IGW_TREE}
+            and tree_settings["kind"] in {"hgb", "river-hoeffding"}
             else None
         ),
     }
@@ -413,8 +507,10 @@ def _simulate_cbpside_candidate(
     order_seed: int,
     policy_seed: int,
     tree_settings: dict[str, Any],
+    update_schedule: str,
+    update_max_round_gap: int = DEFAULT_ADAPTIVE_MAX_ROUND_GAP,
 ) -> dict[str, Any]:
-    """Run strict doubling epochs with beta evaluated for every context."""
+    """Run scheduled epochs with beta evaluated for every current context."""
     x_all = normalized_features[permutation]
     y_all = outcomes[permutation]
     n, dimension = x_all.shape
@@ -444,7 +540,9 @@ def _simulate_cbpside_candidate(
     routed = 0
     correct = 0
 
-    for boundary, start, stop in _doubling_epochs(n):
+    for boundary, start, stop in _adaptive_epochs(
+        n, update_schedule, update_max_round_gap
+    ):
         del boundary
         if state_dirty:
             tasted_x = np.concatenate(tasted_x_chunks, axis=0)
@@ -486,6 +584,7 @@ def _simulate_cbpside_candidate(
             tasted_count += int(revealed_y.size)
             state_dirty = True
 
+    schedule_slug = _schedule_slug(update_schedule, update_max_round_gap)
     row = _base_row(
         policy=POLICY_CBPSIDE,
         l01=l01,
@@ -499,9 +598,12 @@ def _simulate_cbpside_candidate(
         policy_seed=policy_seed,
         examples=n,
         tree_settings=tree_settings,
+        update_schedule=f"global_round_{schedule_slug}_before_action",
     )
     row["confidence_cap"] = float(confidence_cap)
-    row["confidence_matrix_state"] = "frozen_within_each_doubling_epoch"
+    row["confidence_matrix_state"] = (
+        f"frozen_within_each_{schedule_slug}_epoch"
+    )
     row["theta_warm_started"] = not zero_start
     return _finish_row(
         row,
@@ -532,8 +634,10 @@ def _simulate_igw_candidate(
     order_seed: int,
     policy_seed: int,
     estimator_settings: dict[str, Any],
+    update_schedule: str,
+    update_max_round_gap: int = DEFAULT_ADAPTIVE_MAX_ROUND_GAP,
 ) -> dict[str, Any]:
-    """Run IGW with a predictor snapshot updated at global doubling rounds."""
+    """Run IGW with predictor snapshots updated at scheduled global rounds."""
     if policy not in {POLICY_IGW_TREE, POLICY_IGW_LINEAR}:
         raise ValueError(f"Unsupported IGW policy identifier: {policy}")
     if (policy == POLICY_IGW_LINEAR) != (
@@ -557,7 +661,9 @@ def _simulate_igw_candidate(
     routed = 0
     correct = 0
 
-    for boundary, start, stop in _doubling_epochs(n):
+    for boundary, start, stop in _adaptive_epochs(
+        n, update_schedule, update_max_round_gap
+    ):
         del boundary
         if state_dirty and _tree_is_feasible(label_counts):
             if backend is None:
@@ -616,6 +722,7 @@ def _simulate_igw_candidate(
             tasted_count += int(revealed_y.size)
             state_dirty = True
 
+    schedule_slug = _schedule_slug(update_schedule, update_max_round_gap)
     row = _base_row(
         policy=policy,
         l01=l01,
@@ -629,6 +736,7 @@ def _simulate_igw_candidate(
         policy_seed=policy_seed,
         examples=n,
         tree_settings=estimator_settings,
+        update_schedule=f"global_round_{schedule_slug}_before_action",
     )
     row.update(
         {
@@ -636,9 +744,9 @@ def _simulate_igw_candidate(
             "igw_min_propensity": float(min_propensity),
             "inverse_propensity_weight_cap": float(1.0 / min_propensity),
             "estimator_feedback_update": (
-                "buffered_incremental_at_doubling_boundaries"
+                f"buffered_incremental_at_{schedule_slug}_boundaries"
                 if estimator_settings["kind"] == "river-hoeffding"
-                else "full_history_refit_at_doubling_boundaries"
+                else f"full_history_refit_at_{schedule_slug}_boundaries"
             ),
             "estimator_profile": estimator_settings,
             "comparison_role": (
@@ -662,6 +770,7 @@ def _simulate_etc_candidates(
     outcomes: np.ndarray,
     permutation: np.ndarray,
     *,
+    policy: str,
     l01_values: Sequence[float],
     l11: float,
     multiplier: float,
@@ -669,9 +778,15 @@ def _simulate_etc_candidates(
     order_index: int,
     order_seed: int,
     policy_seed: int,
-    tree_settings: dict[str, Any],
+    estimator_settings: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Fit ETC once per order/multiplier and reuse its tail predictions by l01."""
+    """Fit an ETC estimator at most once and reuse tail predictions by l01."""
+    if policy not in {POLICY_ETC, POLICY_ETC_LINEAR}:
+        raise ValueError(f"Unsupported ETC policy identifier: {policy}")
+    if (policy == POLICY_ETC_LINEAR) != (
+        estimator_settings["kind"] == "logistic"
+    ):
+        raise ValueError("ETC policy identifier and estimator kind do not match")
     x_all = contexts[permutation]
     y_all = outcomes[permutation]
     n = x_all.shape[0]
@@ -681,7 +796,7 @@ def _simulate_etc_candidates(
     backend = None
     model_updates = 0
     if _tree_is_feasible(label_counts):
-        backend = make_tree_backend(tree_settings, seed=policy_seed)
+        backend = make_tree_backend(estimator_settings, seed=policy_seed)
         weights = np.ones(forced_tastes, dtype=np.float64)
         if backend.supports_incremental:
             backend.update_many(x_all[:forced_tastes], prefix_y, weights)
@@ -709,7 +824,7 @@ def _simulate_etc_candidates(
             np.count_nonzero(tail_actions | (y_all[forced_tastes:] == 0))
         )
         row = _base_row(
-            policy=POLICY_ETC,
+            policy=policy,
             l01=l01,
             l11=l11,
             multiplier=multiplier,
@@ -720,10 +835,24 @@ def _simulate_etc_candidates(
             order_seed=order_seed,
             policy_seed=policy_seed,
             examples=n,
-            tree_settings=tree_settings,
+            tree_settings=estimator_settings,
+            update_schedule="forced_taste_prefix_fit_then_freeze",
         )
         row["forced_taste_rounding"] = "ceil(multiplier * base_tastes), capped at n"
-        row["tree_feedback_update"] = "unit_weight_prefix_fit_then_freeze"
+        row["estimator_feedback_update"] = "unit_weight_prefix_fit_then_freeze"
+        row["forced_prefix_label_counts"] = [
+            int(label_counts[0]),
+            int(label_counts[1]),
+        ]
+        row["estimator_fit_feasible"] = backend is not None
+        row["estimator_fallback"] = (
+            None
+            if backend is not None
+            else "laplace_smoothed_forced_prefix_prevalence"
+        )
+        row["comparison_role"] = (
+            "linear_oracle" if policy == POLICY_ETC_LINEAR else "nonlinear_tree_oracle"
+        )
         rows.append(
             _finish_row(
                 row,
@@ -816,7 +945,14 @@ def _aggregate_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups.setdefault(key, []).append(row)
 
     aggregated: list[dict[str, Any]] = []
-    for key in sorted(groups, key=lambda item: (item[0], item[1], item[3])):
+    for key in sorted(
+        groups,
+        key=lambda item: (
+            POLICY_OUTPUT_RANK.get(item[0], len(POLICY_OUTPUT_RANK)),
+            item[1],
+            item[3],
+        ),
+    ):
         group = sorted(groups[key], key=lambda row: int(row["order_run"]))
         first = group[0]
         result = {
@@ -860,7 +996,13 @@ def _select_pointwise_multipliers(
         groups.setdefault(key, []).append(row)
 
     selected: list[dict[str, Any]] = []
-    for key in sorted(groups, key=lambda item: (item[0], item[1])):
+    for key in sorted(
+        groups,
+        key=lambda item: (
+            POLICY_OUTPUT_RANK.get(item[0], len(POLICY_OUTPUT_RANK)),
+            item[1],
+        ),
+    ):
         candidates = groups[key]
         winner = min(
             candidates,
@@ -934,7 +1076,7 @@ def _expected_random_rows(
         accuracy = 1.0 - (1.0 - rate) * disagreement_count / n
         row = {
             "policy": "Random",
-            "method": "Random (expected, matched to selected ETC)",
+            "method": "Random (expected, matched to selected ETC HGB)",
             "l01": float(etc["l01"]),
             "l11": float(etc["l11"]),
             "alpha": float(etc["alpha"]),
@@ -953,6 +1095,8 @@ def _expected_random_rows(
             "model_updates": 0,
             "last_model_training_count": 0,
             "random_baseline": "analytic expectation conditional on ETC traffic",
+            "matched_etc_policy": POLICY_ETC,
+            "matched_etc_probability_estimator": etc["probability_estimator"],
             "matched_etc_multiplier": float(etc["selected_multiplier"]),
             "selection_evaluation_reuse": True,
         }
@@ -975,15 +1119,12 @@ def _aggregate_selected(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         key = (str(row["policy"]), float(row["l01"]), float(row["l11"]))
         groups.setdefault(key, []).append(row)
     aggregated: list[dict[str, Any]] = []
-    policy_order = {
-        POLICY_CBPSIDE: 0,
-        POLICY_ETC: 1,
-        POLICY_IGW_LINEAR: 2,
-        POLICY_IGW_TREE: 3,
-        "Random": 4,
-    }
     for key in sorted(
-        groups, key=lambda item: (policy_order.get(item[0], 99), item[1])
+        groups,
+        key=lambda item: (
+            POLICY_OUTPUT_RANK.get(item[0], len(POLICY_OUTPUT_RANK)),
+            item[1],
+        ),
     ):
         group = sorted(groups[key], key=lambda row: int(row["order_run"]))
         first = group[0]
@@ -1326,7 +1467,8 @@ def _plot_selected_multipliers(path: Path, selections: list[dict[str, Any]]) -> 
     figure, axis = plt.subplots(figsize=(9, 5), constrained_layout=True)
     labels = {
         POLICY_CBPSIDE: "CBPSide",
-        POLICY_ETC: "ETC",
+        POLICY_ETC: "ETC HGB",
+        POLICY_ETC_LINEAR: "ETC Linear",
         POLICY_IGW_LINEAR: "IGW Linear",
         POLICY_IGW_TREE: "IGW Tree",
     }
@@ -1479,8 +1621,24 @@ def _manifest_and_fingerprint(
         identity.update(b"\0")
     identity.update(np.ascontiguousarray(contexts).tobytes())
     identity.update(np.ascontiguousarray(outcomes).tobytes())
+    adaptive_boundaries = list(
+        _schedule_boundaries(
+            n,
+            args.adaptive_update_schedule,
+            args.adaptive_max_round_gap,
+        )
+    )
+    if args.adaptive_update_schedule == "capped-doubling":
+        boundary_rule = (
+            "before global rounds starting at 1, with "
+            f"next=min(2*current, current+{args.adaptive_max_round_gap})"
+        )
+    elif args.adaptive_update_schedule == "fibonacci":
+        boundary_rule = "before global rounds 1,2,3,5,8,..."
+    else:
+        boundary_rule = "before global rounds 1,2,4,8,..."
     manifest = {
-        "design": "pointwise-online-parameter-multiplier-sweep-v3",
+        "design": "pointwise-online-parameter-multiplier-sweep-v5",
         "implementation_revision": TUNING_IMPLEMENTATION_REVISION,
         "cache": str(args.cache.resolve()),
         "examples": int(n),
@@ -1528,7 +1686,22 @@ def _manifest_and_fingerprint(
             for multiplier in args.multipliers
         },
         "update_schedule": {
-            "boundaries": "before global rounds 1,2,4,8,...",
+            "name": args.adaptive_update_schedule,
+            "maximum_round_gap": (
+                int(args.adaptive_max_round_gap)
+                if args.adaptive_update_schedule == "capped-doubling"
+                else None
+            ),
+            "boundary_rule": boundary_rule,
+            "boundary_rounds": adaptive_boundaries,
+            "boundary_count": len(adaptive_boundaries),
+            "maximum_model_updates": max(0, len(adaptive_boundaries) - 1),
+            "last_boundary_round": (
+                adaptive_boundaries[-1] if adaptive_boundaries else None
+            ),
+            "final_frozen_epoch_rounds": (
+                n - adaptive_boundaries[-1] + 1 if adaptive_boundaries else 0
+            ),
             "history_cutoff": "feedback through boundary_round-1",
             "cbpside_theta": "refit only at boundary when new tastes exist",
             "cbpside_V_inverse": "recompute only at boundary and freeze in epoch",
@@ -1541,6 +1714,25 @@ def _manifest_and_fingerprint(
             "igw_linear": "full revealed-history refit only at boundary",
         },
         "tree": _tree_settings(args),
+        "igw_tree_profile": _tree_settings(args),
+        "etc_hgb_profile": {
+            "settings": _etc_hgb_settings(args),
+            "established_profile": ONLINE_HGB_PROFILE,
+            "fit_rule": (
+                "when the prefix has at least two rows per class, fit once "
+                "with unit weights and freeze; otherwise use the recorded "
+                "Laplace-smoothed prevalence fallback"
+            ),
+        },
+        "etc_linear_profile": {
+            "settings": _linear_settings(),
+            "fit_rule": (
+                "when the prefix has at least two rows per class, fit once "
+                "with unit weights and freeze; otherwise use the recorded "
+                "Laplace-smoothed prevalence fallback"
+            ),
+            "forced_prefix_shared_with": POLICY_ETC,
+        },
         "igw_linear_profile": _linear_settings(),
         "igw_estimator_comparison": {
             "shared_protocol": [
@@ -1549,7 +1741,9 @@ def _manifest_and_fingerprint(
                 "capped inverse-propensity weighting rule",
                 "gamma multiplier grid",
                 "policy random numbers",
-                "global-round doubling schedule",
+                "global-round "
+                f"{_schedule_slug(args.adaptive_update_schedule, args.adaptive_max_round_gap)} "
+                "schedule",
             ],
             "fixed_multiplier_contrast": (
                 "same gamma; probability-estimator family is the only configured "
@@ -1561,6 +1755,22 @@ def _manifest_and_fingerprint(
             ),
             "tree_policy": POLICY_IGW_TREE,
             "linear_policy": POLICY_IGW_LINEAR,
+        },
+        "etc_estimator_comparison": {
+            "tree_policy": POLICY_ETC,
+            "linear_policy": POLICY_ETC_LINEAR,
+            "shared_protocol": [
+                "contexts",
+                "paired shuffled online orders",
+                "forced-taste multiplier grid",
+                "identical forced prefix for a given order and multiplier",
+                "unit training weights",
+                "shared two-rows-per-class feasibility gate and fallback",
+                "fit at most once and freeze",
+            ],
+            "selection": (
+                "each estimator selects its multiplier independently for each l01"
+            ),
         },
         "hgb_profile": (
             ONLINE_HGB_PROFILE if args.tree_estimator == "hgb" else None
@@ -1576,7 +1786,10 @@ def _manifest_and_fingerprint(
             "interpretation": "exploratory optimistic oracle envelope",
             "error_bars": "plus/minus one sample SD across shuffled orders",
         },
-        "random": "analytic expected routing matched per order to selected ETC traffic",
+        "random": (
+            "analytic expected routing matched per order only to selected ETC "
+            "HGB traffic (not ETC Linear)"
+        ),
         "data_identity_sha256": identity.hexdigest(),
     }
     encoded = json.dumps(_jsonable(manifest), sort_keys=True).encode("utf-8")
@@ -1648,61 +1861,70 @@ def _run_sweep(
     base_tastes: float,
 ) -> None:
     tree_settings = _tree_settings(args)
+    etc_hgb_settings = _etc_hgb_settings(args)
     linear_settings = _linear_settings()
     total_candidate_groups = len(args.multipliers) * (
-        1 + 3 * len(args.l01_values)
+        2 + 3 * len(args.l01_values)
     )
     group_number = 0
 
-    # ETC is fit once for each order/multiplier and reused across every l01.
-    for multiplier in args.multipliers:
-        group_number += 1
-        missing_orders = []
-        for order_index in range(args.online_order_repeats):
-            if any(
-                _load_checkpoint(
-                    _checkpoint_path(
-                        output, POLICY_ETC, l01, multiplier, order_index
-                    ),
-                    fingerprint,
-                )
-                is None
-                for l01 in args.l01_values
+    # Each feasible ETC estimator is fit once per order/multiplier; its frozen
+    # tail probabilities are reused across every l01 value.
+    for policy, estimator_settings in (
+        (POLICY_ETC, etc_hgb_settings),
+        (POLICY_ETC_LINEAR, linear_settings),
+    ):
+        for multiplier in args.multipliers:
+            group_number += 1
+            missing_orders = []
+            for order_index in range(args.online_order_repeats):
+                if any(
+                    _load_checkpoint(
+                        _checkpoint_path(
+                            output, policy, l01, multiplier, order_index
+                        ),
+                        fingerprint,
+                    )
+                    is None
+                    for l01 in args.l01_values
+                ):
+                    missing_orders.append(order_index)
+            print(
+                f"[{group_number}/{total_candidate_groups}] "
+                f"{_method_label(policy, estimator_settings)} "
+                f"multiplier={multiplier:g}; "
+                f"{len(missing_orders)} order run(s) remaining",
+                flush=True,
+            )
+            tasks = [
+                {
+                    "contexts": contexts,
+                    "outcomes": outcomes,
+                    "permutation": permutations[order_index],
+                    "policy": policy,
+                    "l01_values": args.l01_values,
+                    "l11": args.l11,
+                    "multiplier": multiplier,
+                    "base_tastes": base_tastes,
+                    "order_index": order_index,
+                    "order_seed": args.seed + order_index,
+                    "policy_seed": args.policy_seed,
+                    "estimator_settings": estimator_settings,
+                }
+                for order_index in missing_orders
+            ]
+            for result_rows in _parallel_map(
+                _simulate_etc_candidates, tasks, args.jobs
             ):
-                missing_orders.append(order_index)
-        print(
-            f"[{group_number}/{total_candidate_groups}] ETC multiplier={multiplier:g}; "
-            f"{len(missing_orders)} order run(s) remaining",
-            flush=True,
-        )
-        tasks = [
-            {
-                "contexts": contexts,
-                "outcomes": outcomes,
-                "permutation": permutations[order_index],
-                "l01_values": args.l01_values,
-                "l11": args.l11,
-                "multiplier": multiplier,
-                "base_tastes": base_tastes,
-                "order_index": order_index,
-                "order_seed": args.seed + order_index,
-                "policy_seed": args.policy_seed,
-                "tree_settings": tree_settings,
-            }
-            for order_index in missing_orders
-        ]
-        for result_rows in _parallel_map(
-            _simulate_etc_candidates, tasks, args.jobs
-        ):
-            for row in result_rows:
-                path = _checkpoint_path(
-                    output,
-                    POLICY_ETC,
-                    float(row["l01"]),
-                    multiplier,
-                    int(row["order_run"]) - 1,
-                )
-                _save_checkpoint(path, row, fingerprint)
+                for row in result_rows:
+                    path = _checkpoint_path(
+                        output,
+                        policy,
+                        float(row["l01"]),
+                        multiplier,
+                        int(row["order_run"]) - 1,
+                    )
+                    _save_checkpoint(path, row, fingerprint)
 
     for policy in (POLICY_CBPSIDE, POLICY_IGW_LINEAR, POLICY_IGW_TREE):
         for l01 in args.l01_values:
@@ -1727,6 +1949,8 @@ def _run_sweep(
                     "l11": args.l11,
                     "multiplier": multiplier,
                     "policy_seed": args.policy_seed,
+                    "update_schedule": args.adaptive_update_schedule,
+                    "update_max_round_gap": args.adaptive_max_round_gap,
                 }
                 if policy == POLICY_CBPSIDE:
                     tasks = [
@@ -1803,7 +2027,9 @@ def _write_final_outputs(
         )
     candidate_rows.sort(
         key=lambda row: (
-            str(row["policy"]),
+            POLICY_OUTPUT_RANK.get(
+                str(row["policy"]), len(POLICY_OUTPUT_RANK)
+            ),
             float(row["l01"]),
             float(row["multiplier"]),
             int(row["order_run"]),
@@ -1883,11 +2109,12 @@ def _write_final_outputs(
             ),
         },
         "important_interpretation": (
-            "Each point on a selected curve is the best of five multipliers on "
-            "these same 20 orders. Those curves are exploratory optimistic oracle "
-            "envelopes, not unbiased estimates of preselected policies. The "
-            "matched-gamma comparison retains every multiplier without selecting "
-            "a winner."
+            f"Each point on a selected curve is the best of "
+            f"{len(args.multipliers)} multipliers on these same "
+            f"{args.online_order_repeats} orders. Those curves are exploratory "
+            "optimistic oracle envelopes, not unbiased estimates of preselected "
+            "policies. The matched-gamma comparison retains every multiplier "
+            "without selecting a winner."
         ),
         "alpha_relation": (
             "alpha = 1/l01 because l11 = 1"
@@ -1958,7 +2185,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     base_tastes = float(manifest["base_parameters"]["etc_tastes"])
     print(
         f"Loaded {len(rounds):,} eligible rows with {contexts.shape[1]} features. "
-        f"Tree={args.tree_estimator}; IGW Linear=enabled; "
+        f"IGW Tree={args.tree_estimator}; IGW Linear=enabled; "
+        f"ETC HGB leaves={args.hgb_max_leaf_nodes}; ETC Linear=enabled; "
+        "adaptive schedule="
+        f"{_schedule_slug(args.adaptive_update_schedule, args.adaptive_max_round_gap)}; "
         f"{args.online_order_repeats} paired orders; "
         f"base gamma={base_gamma:.12g}; base ETC tastes={base_tastes:.12g}.",
         flush=True,

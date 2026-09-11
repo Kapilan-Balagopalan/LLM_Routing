@@ -12,9 +12,15 @@ every five additional tastes. The real routing target is cached weak/strong
 disagreement. A separate synthetic-label positive control is available for
 implementation sanity checks; it must not be interpreted as real benchmark
 routing performance. A separate resumable multiplier tuner is now available
-for the next 20-order study. It adds a protocol-matched IGW Linear policy beside
-nonlinear IGW Tree and reports both separately tuned and matched-gamma views,
-without altering the established simulator.
+for 20-order studies. Completed revision-3 pure-doubling, revision-4
+Fibonacci, and revision-5 capped-doubling gap-500 artifacts remain in their
+original fingerprinted directories, but their numerical results were not
+analyzed during the later schedule code changes. The current planned, unrun
+revision-5 gap-100 study retains ETCLinear beside the fixed 15-leaf HGB ETC and
+the matched IGW Linear versus IGW Tree comparison. Adaptive tuner refits now
+default to capped exponential doubling: the next global-round boundary is
+`min(2b, b+100)`.
+This does not alter the established simulator.
 
 For experiment history and conclusions, read [EXPERIMENTS.md](EXPERIMENTS.md).
 For module boundaries and data flow, read [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -75,8 +81,8 @@ git switch experiment/boolq-cbpside-beta1
 Create the environment and install the project:
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
+python -m venv .routing-venv
+.\.routing-venv\Scripts\Activate.ps1
 python -m pip install -e ".[test]"
 python -m pytest -q
 ```
@@ -139,28 +145,47 @@ multipliers `0.1, 0.3, 1, 3, 10` on the same 20 shuffled orders:
 | Policy | Base parameter | Multiplier rule |
 |---|---:|---|
 | CBPSide | beta scale 0.5 | `beta(x_t) = min((0.5 * multiplier) * sqrt(x_t^T V^-1 x_t), 0.5)`; the cap stays 0.5 |
+| ETC HGB | `n^(2/3)` tastes | `tastes = ceil(multiplier * n^(2/3))`, bounded to the online horizon; fixed 15-leaf HGB |
+| ETC Linear | `n^(2/3)` tastes | The identical forced-taste candidate with a weighted standardized linear logistic estimator |
 | IGW Tree | `gamma=sqrt(n)` | `gamma = multiplier * sqrt(n)` with a nonlinear HGB probability estimator |
 | IGW Linear | `gamma=sqrt(n)` | The identical gamma candidate and IGW rule, with only the estimator changed to linear logistic |
-| ETC | `n^(2/3)` tastes | `tastes = ceil(multiplier * n^(2/3))`, bounded to the online horizon |
 
 The 20 order seeds are paired across policies, losses, and multipliers. Model
-snapshots change immediately before global rounds `t=1,2,4,8,...` and use only
-feedback through `t-1`. CBPSide freezes `theta_hat` and `V^-1` within each
-epoch, while its context-dependent beta is still evaluated for every current
-`x_t`. IGW Tree refits the default HGB on its complete revealed history at each
-eligible boundary; IGW Linear refits a revealed-history weighted
-`StandardScaler` plus IPS-weighted L2 logistic model (`C=1`, `lbfgs`) on its
-own revealed rows at the same boundaries. This affine preprocessing preserves
-a linear decision surface. Both IGW variants use the same 138 features, gamma
-candidate, policy random numbers, selective-feedback protocol, doubling
-schedule, and capped inverse-propensity-weighting rule. At a fixed gamma, the
-probability estimator is the only configured difference. It is not the only
-realized difference: once their actions diverge, each policy observes its own
-feedback rows and computes its own propensities and IPS weights. ETC fits once
-for each order/multiplier pair and reuses the same fitted probabilities across
-every `l01`, which avoids redundant fits.
+snapshots for CBPSide, IGW Tree, and IGW Linear change immediately before
+capped-doubling global rounds by default. Starting at `b=1`, each next boundary
+is `min(2b, b+100)`, so the schedule doubles early and then limits boundary
+gaps to 100 rounds. Each snapshot uses only feedback through `t-1`, and the
+policy is still evaluated on every round. CBPSide freezes
+`theta_hat` and `V^-1` within each epoch, while its context-dependent beta is
+still evaluated for every current `x_t`. IGW Tree refits the default HGB on its
+complete revealed history at each eligible boundary; IGW Linear refits a
+revealed-history weighted `StandardScaler` plus IPS-weighted L2 logistic model
+(`C=1`, `lbfgs`) on its own revealed rows at the same boundaries. This affine
+preprocessing preserves a linear decision surface. Both IGW variants use the
+same 138 features, gamma candidate, policy random numbers,
+selective-feedback protocol, capped-doubling schedule, and capped
+inverse-propensity-weighting rule. At a fixed gamma, the probability estimator
+is the only configured difference. It is not the only realized difference:
+once their actions diverge, each policy observes its own feedback rows and
+computes its own propensities and IPS weights.
 
-For each policy/`l01` pair, the selected multiplier minimizes mean realized
+ETC HGB and ETC Linear use the identical shuffled order, forced prefix, taste
+budget, and unit training weights for a given order and multiplier. When the
+prefix contains at least two examples from each class, each fits once, freezes,
+and reuses its fitted probabilities across every `l01`. If that feasibility
+gate fails, the candidate performs no model fit and uses the Laplace-smoothed
+prefix prevalence as a constant tail probability; the saved row records this
+fallback and both prefix class counts. The two policies independently select
+their pointwise taste multiplier. Neither ETC variant is affected by the
+adaptive update schedule. Pass `--adaptive-update-schedule fibonacci` to select
+Fibonacci boundaries for a new revision-5 run, or
+`--adaptive-update-schedule doubling` to select the original `1,2,4,8,...`
+boundary rule for a new revision-5 run. These options do not make revision-5
+checkpoints compatible with the completed revision-4 Fibonacci or revision-3
+four-policy directories; resume and `--plot-only` for those archived artifacts
+require their original code revision.
+
+For each learned policy/`l01` pair, the selected multiplier minimizes mean realized
 total cost over the 20 orders. In particular, IGW Tree and IGW Linear select
 their gamma multipliers independently. Their selected comparison is therefore
 best-vs-best and the two selected gammas can differ; it is not a matched-gamma
@@ -172,24 +197,29 @@ Because the same 20 orders are used to select and display the winner, this is
 an exploratory, optimistic oracle envelope. A later confirmatory study should
 evaluate preselected multipliers on fresh order seeds.
 
-### Full HGB sweep
+### Full HGB/ETC-linear capped-doubling gap-100 sweep
 
 HGB with 15 maximum leaves remains the default so this sweep is directly
 comparable with the established routing experiments and remains the nonlinear
-primary for IGW Tree. The same run also evaluates IGW Linear automatically.
-Across CBPSide, ETC, IGW Tree, and IGW Linear, the full design produces 3,600
-learned candidate rows (`4 * 9 * 5 * 20`) before adding analytic Random. The
-base gamma and ETC taste count are intentionally omitted below so they are
-derived from the eligible online horizon.
+primary for ETC HGB and IGW Tree. The same run evaluates ETC Linear and IGW
+Linear automatically. Across CBPSide, ETC HGB, ETC Linear, IGW Tree, and IGW
+Linear, the full design produces 4,500 learned candidate rows
+(`5 * 9 * 5 * 20`) before adding analytic Random. Final selection retains five
+learned policies plus Random. The base gamma and ETC taste count are
+intentionally omitted below so they are derived from the eligible online
+horizon. This 2026-09-11 revision is implemented but has not been run as a full
+experiment.
 
 ```powershell
-.\.venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-hgb-linear-results `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap100-results `
   --context-profile all-features `
   --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
   --multipliers 0.1 0.3 1 3 10 `
   --online-order-repeats 20 `
+  --adaptive-update-schedule capped-doubling `
+  --adaptive-max-round-gap 100 `
   --cbpside-base-beta-scale 0.5 `
   --cbpside-max-confidence-radius 0.5 `
   --igw-mu 2 `
@@ -200,14 +230,24 @@ derived from the eligible online horizon.
   --policy-seed 0
 ```
 
-Adding IGW Linear adds 900 full trajectories (`9 * 5 * 20`) to the HGB sweep.
-At eligible doubling boundaries, each linear trajectory refits both a weighted
-`StandardScaler` and an IPS-weighted `lbfgs` logistic model on its complete
-revealed history. The full run will therefore take materially longer than the
-earlier three-policy design. Use the new `hgb-linear` output directory shown
-above; an older three-policy output has a different configuration fingerprint
-and cannot be mixed with this run. Once started, rerun the identical command to
-resume its completed candidate checkpoints.
+Relative to the earlier four-policy design, ETC Linear adds 900 candidate rows
+(`9 * 5 * 20`). It uses at most one unit-weight prefix fit per order/multiplier
+and then reuses frozen probabilities across losses. At `n=12,648`, capped
+doubling with a 100-round gap has 133 boundaries and permits at most 132
+adaptive refits after feedback exists. Its repeated full-history row-work upper
+bound is 803,622, which is `28.06x` the Fibonacci upper bound, `49.09x` pure
+doubling, and `4.92x` the completed gap-500 configuration. In exchange, its
+final potentially stale tail is only 21 rounds, versus 137 for gap 500, 1,703
+for Fibonacci, and 4,457 for pure doubling. This is a very large runtime
+increase;
+the actual number of fits can be lower when no new tastes arrive or both
+classes are not yet available. Use the fresh capped-doubling output directory
+shown above; older outputs have a different configuration fingerprint and
+cannot be mixed with this run. The completed gap-500 directory remains a valid
+revision-5 result: use its original directory and explicitly pass
+`--adaptive-max-round-gap 500` to resume or rebuild its plots. Once the gap-100
+run is started, rerun the identical gap-100 command to resume its completed
+candidate checkpoints.
 
 Each completed policy/`l01`/multiplier/order candidate is saved atomically.
 If the run is interrupted, repeat the exact command above with the same output
@@ -215,19 +255,21 @@ directory; complete checkpoints are skipped. Do not change a scientific option
 when resuming because the output directory is protected by a configuration
 fingerprint.
 
-To estimate HGB-plus-linear runtime before committing to the full sweep, use
+To estimate the five-policy runtime before committing to the full sweep, use
 this reduced execution pilot in its own output directory. It is an execution
 check, not a research result, and implementation work does not run it:
 
 ```powershell
-.\.venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-hgb-linear-pilot `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap100-pilot `
   --context-profile all-features `
   --limit 500 `
   --l01-values 1.8 2.6 3.3 `
   --multipliers 0.3 1 3 `
   --online-order-repeats 2 `
+  --adaptive-update-schedule capped-doubling `
+  --adaptive-max-round-gap 100 `
   --tree-estimator hgb `
   --hgb-max-leaf-nodes 15 `
   --jobs 1 `
@@ -239,13 +281,15 @@ After all checkpoints exist, tables and figures can be rebuilt without running
 any policy again:
 
 ```powershell
-.\.venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-hgb-linear-results `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap100-results `
   --context-profile all-features `
   --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
   --multipliers 0.1 0.3 1 3 10 `
   --online-order-repeats 20 `
+  --adaptive-update-schedule capped-doubling `
+  --adaptive-max-round-gap 100 `
   --cbpside-base-beta-scale 0.5 `
   --cbpside-max-confidence-radius 0.5 `
   --igw-mu 2 `
@@ -259,24 +303,26 @@ any policy again:
 ### Optional River Hoeffding-tree sensitivity
 
 `river-hoeffding` is an explicitly different tree-family sensitivity check,
-not a drop-in speed claim. It replaces HGB for ETC and IGW Tree, uses River
-0.21.2, accepts IGW inverse-propensity sample weights, and defaults to maximum
-depth 4 with grace period 200. IGW Linear remains linear logistic, so its
-comparison changes neither estimator nor tuning settings in the River run. A
-Mondrian forest is not included because its River update API does not accept
-the required per-example weights.
+not a drop-in speed claim. It replaces HGB only for IGW Tree, uses River 0.21.2,
+accepts IGW inverse-propensity sample weights, and defaults to maximum depth 4
+with grace period 200. ETC HGB remains the fixed 15-leaf HGB reference;
+ETC Linear and IGW Linear remain linear logistic. A Mondrian forest is not
+included because its River update API does not accept the required per-example
+weights.
 
 First measure correctness and runtime on this non-scientific pilot:
 
 ```powershell
-.\.venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-river-linear-pilot `
+  --output-dir .\boolq-138d-multiplier-sweep-river-igw-etc-linear-capped-doubling-gap100-pilot `
   --context-profile all-features `
   --limit 500 `
   --l01-values 1.8 2.6 3.3 `
   --multipliers 0.3 1 3 `
   --online-order-repeats 2 `
+  --adaptive-update-schedule capped-doubling `
+  --adaptive-max-round-gap 100 `
   --tree-estimator river-hoeffding `
   --river-max-depth 4 `
   --river-grace-period 200 `
@@ -289,13 +335,15 @@ If that pilot is satisfactory, run the complete River sensitivity study in a
 new output directory:
 
 ```powershell
-.\.venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-river-linear-results `
+  --output-dir .\boolq-138d-multiplier-sweep-river-igw-etc-linear-capped-doubling-gap100-results `
   --context-profile all-features `
   --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
   --multipliers 0.1 0.3 1 3 10 `
   --online-order-repeats 20 `
+  --adaptive-update-schedule capped-doubling `
+  --adaptive-max-round-gap 100 `
   --cbpside-base-beta-scale 0.5 `
   --cbpside-max-confidence-radius 0.5 `
   --igw-mu 2 `
@@ -308,10 +356,10 @@ new output directory:
 ```
 
 River IGW Tree receives buffered weighted tastes only at the same global
-doubling boundaries, so its predictions remain frozen within each epoch. IGW
-Linear uses its matching full-history refit at those boundaries. Rerun the same
-command to resume, or add `--plot-only` after completion while keeping all
-scientific options unchanged.
+capped-doubling boundaries, so its predictions remain frozen within each
+epoch. IGW Linear uses its matching full-history refit at those boundaries. Both ETC
+variants still fit once and freeze. Rerun the same command to resume, or add
+`--plot-only` after completion while keeping all scientific options unchanged.
 
 ### Multiplier-sweep outputs
 
@@ -320,21 +368,21 @@ scientific options unchanged.
 | `sweep_manifest.json` | Complete design, derived bases, epoch semantics, data fingerprint, and selection warning |
 | `checkpoints/` | Atomic candidate-level rows used for interruption-safe resume |
 | `online_order_permutations.npz` | The exact 20 paired permutations and seeds |
-| `candidate_results_by_order.csv/json` | All 3,600 learned policy/loss/multiplier/order results |
+| `candidate_results_by_order.csv/json` | All 4,500 learned policy/loss/multiplier/order results |
 | `candidate_results.csv/json` | Candidate means, sample SDs, and standard errors |
-| `selected_multipliers.csv/json` | Pointwise winning multiplier and effective parameter, including separate IGW Tree and IGW Linear choices |
-| `selected_results_by_order.csv/json` | Selected policy rows plus analytic Random matched to selected ETC traffic |
+| `selected_multipliers.csv/json` | Pointwise winning multiplier and effective parameter for all five learned policies, including independent ETC HGB/ETC Linear and IGW Tree/IGW Linear choices |
+| `selected_results_by_order.csv/json` | Five selected learned-policy rows plus analytic Random matched only to selected ETC HGB traffic |
 | `selected_results.csv/json` | Final across-order summaries used for plots |
 | `igw_tree_vs_linear_by_order.csv/json` | Separately tuned best-vs-best IGW differences on each paired order; selected gammas may differ |
 | `igw_tree_vs_linear.csv/json` | Across-order mean, SD, and SEM for that separately tuned comparison |
 | `igw_tree_vs_linear_matched_by_order.csv/json` | Tree-versus-linear differences at each common gamma multiplier and paired order |
 | `igw_tree_vs_linear_matched.csv/json` | Across-order matched-gamma means, SDs, and SEMs by `l01` and multiplier |
-| `selected_routing_accuracy.png` | CBPSide, ETC, IGW Tree, IGW Linear, and Random routing rate versus cached-strong-reference accuracy with order-SD bars |
-| `selected_cost_vs_l01.png` | The same five curves' selected realized total cost versus ascending `l01` with order-SD bars |
-| `selected_multiplier_vs_l01.png` | Selected multiplier at each policy/loss point |
+| `selected_routing_accuracy.png` | CBPSide, ETC HGB, ETC Linear, IGW Tree, IGW Linear, and Random routing rate versus cached-strong-reference accuracy with order-SD bars |
+| `selected_cost_vs_l01.png` | The same six curves' selected realized total cost versus ascending `l01` with order-SD bars |
+| `selected_multiplier_vs_l01.png` | Selected multiplier for each of the five learned policies at every loss point |
 | `igw_tree_vs_linear_cost_difference.png` | Separately tuned best-vs-best `linear cost - tree cost`; positive values favor IGW Tree |
 | `igw_tree_vs_linear_matched_cost_difference.png` | Matched-gamma `linear cost - tree cost` for all five common multipliers |
-| `summary.json` | Compact selected results, both IGW comparisons, and oracle-selection warning |
+| `summary.json` | Compact five-policy-plus-Random selected results, both IGW comparisons, and oracle-selection warning |
 | `multiplier-sweep-results.zip` | Portable top-level tables, figures, manifest, and summary |
 
 The bundle contains five figures: three selected-policy plots, the separately
@@ -343,10 +391,11 @@ The matched-gamma files isolate the configured estimator choice more directly,
 but they do not force the two policies to take the same actions or observe the
 same feedback.
 
-Random is calculated analytically only after ETC selection; there is no inner
-`--random-repeats` loop in this tuner, and adding IGW Linear does not change the
-Random construction. The checkpoint directory is retained for resume but is
-not copied into the portable ZIP.
+Random is calculated analytically only after ETC HGB selection and is not
+matched to ETC Linear. There is no inner `--random-repeats` loop in this tuner,
+and adding either linear comparator does not change the Random construction.
+The checkpoint directory is retained for resume but is not copied into the
+portable ZIP.
 
 For a quick installation check, run only the supervised path on a prefix:
 
@@ -364,7 +413,10 @@ simulate-llm-routing `
 The smoke test checks execution only; its small-sample metrics are not research
 results.
 
-## Active algorithm settings
+## Established simulator algorithm settings
+
+These settings apply to `simulate-llm-routing`. The separate pointwise tuner
+uses the five learned policies and capped-doubling schedule documented above.
 
 | Policy | Probability model | Exploration and fitting |
 |---|---|---|
@@ -512,8 +564,10 @@ implementation responsibilities are summarized in
 - `src/llm_routing_simulation/online_tree.py`: HGB, weighted standardized
   logistic, and optional weighted River Hoeffding probability backends.
 - `src/llm_routing_simulation/tuning.py`: resumable pointwise multiplier sweep,
-  matched IGW Tree/IGW Linear comparison, selection, analytic Random baseline,
-  and final plots.
+  matched ETC HGB/ETC Linear protocols, matched IGW Tree/IGW Linear comparison,
+  capped doubling with a configurable maximum gap plus Fibonacci and pure
+  doubling reproduction schedules, selection, analytic Random baseline, and
+  final plots.
 - `src/llm_routing_simulation/synthetic_prompt.py`: synthetic-label positive
   control.
 

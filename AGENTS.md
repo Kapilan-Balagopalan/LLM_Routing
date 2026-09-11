@@ -23,17 +23,42 @@
   online orders with sample-SD error bars. CBPSide and IGW refit after every
   five additional tastes; ETC still fits once and freezes. The separate
   `tune-llm-routing` study extends this baseline to 20 paired orders and
-  pointwise multipliers `0.1, 0.3, 1, 3, 10`, using strict global-round
-  doubling epochs and resumable candidate checkpoints. It compares IGW Tree
-  with IGW Linear under the same configured 138D context, gamma grid, paired
-  orders, epoch schedule, and inverse-propensity-weighting rule; only the
-  configured probability estimator differs. Their actions can diverge, so they
-  need not realize the same feedback rows or IPS weights. Report both the
-  separately tuned best-vs-best comparison, whose selected gammas may differ,
-  and the fixed-multiplier matched-gamma estimator comparison. HGB remains the
-  nonlinear primary; `river-hoeffding` is an explicit tree sensitivity option.
-  IGW Linear adds 900 full-history weighted scaler/logistic trajectories, so
-  use the new `hgb-linear` output directory and preserve checkpoint resume.
+  pointwise multipliers `0.1, 0.3, 1, 3, 10`, using resumable candidate
+  checkpoints. Completed revision-3 pure-doubling and revision-4 Fibonacci
+  artifacts are retained in their original fingerprinted output directories;
+  their numerical results were not analyzed during the revision-5 code change,
+  and current revision-5 code cannot resume or plot-only those directories.
+  Use the corresponding original code revision for those archived artifacts.
+  Completed revision-5 capped-doubling gap-500 artifacts are also retained;
+  their numerical results were not analyzed during the subsequent gap-100 code
+  change. Current revision-5 code can resume or plot-only those artifacts only
+  with the original output directory and explicit
+  `--adaptive-max-round-gap 500`. The current planned, unrun gap-100
+  configuration has five tuned policies:
+  CBPSide, fixed 15-leaf HGB ETC, ETCLinear, IGW Tree, and IGW Linear. The two
+  ETC variants share each shuffled order, forced prefix, taste budget, and unit
+  training weights; each feasible prefix fits once, freezes, reuses
+  probabilities across `l01`, and independently tunes its taste multiplier.
+  A prefix with fewer than two rows from either class uses the recorded
+  Laplace-smoothed prevalence fallback without fitting. Random is matched only
+  to selected HGB ETC traffic. CBPSide and both IGW variants now default to
+  capped-doubling global-round boundaries: start at 1 and set the next boundary
+  to `min(2b, b+100)`. Fit before boundary `b` using feedback through `b-1`,
+  while evaluating the policy every round. The ETC variants are unaffected by
+  this schedule. Use `--adaptive-update-schedule fibonacci` or
+  `--adaptive-update-schedule doubling` to select those boundary rules for a
+  new revision-5 run, not to resume the older revision-4 or revision-3 outputs.
+  Report both separately tuned best-vs-best and fixed-multiplier
+  matched-gamma IGW comparisons; actions and realized feedback may diverge.
+  HGB remains the nonlinear primary and `river-hoeffding` changes IGW Tree
+  only. The design has 4,500 candidate rows and selects five learned policies
+  plus Random. At `n=12,648`, capped doubling with gap 100 has 133 boundaries
+  and at most 132 adaptive refits. Its 803,622 full-history row-work upper bound
+  is `28.06x` Fibonacci, `49.09x` pure doubling, and `4.92x` the completed
+  gap-500 configuration, while its final potentially stale tail is 21 rounds.
+  This is a very large runtime increase. Use the fresh
+  `boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap100-results`
+  directory.
 - `backup/current-combined`: recovery snapshot made before branch separation.
 
 Do not mix an experiment into another branch. Shared bug fixes should be made

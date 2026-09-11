@@ -32,11 +32,11 @@ the established single-configuration simulator remains stable:
 boolq-routing-cache-full.zip
     -> tuning.py selects all manifest-defined context blocks and cached disagreement
     -> tuning.py creates 20 paired shuffled orders
-    -> tuning.py evaluates CBPSide, ETC, IGW Tree, and IGW Linear candidates
+    -> tuning.py evaluates CBPSide, ETC HGB, ETC Linear, IGW Tree, and IGW Linear candidates
     -> online_tree.py supplies batch HGB, batch logistic, or incremental Hoeffding estimators
     -> tuning.py checkpoints every completed policy/l01/multiplier/order candidate
     -> tuning.py selects the lowest-mean-cost multiplier at each policy/l01 point
-    -> tuning.py adds analytic Random matched to the selected ETC traffic
+    -> tuning.py adds analytic Random matched only to the selected ETC HGB traffic
     -> tuning.py writes reusable tables, figures, and a ZIP bundle
 ```
 
@@ -169,17 +169,18 @@ train-validation task on the canonical sample collection.
 ### `online_tree.py`
 
 Defines the probability-estimator boundary used only by the multiplier tuner.
-The default backend is the established scikit-learn 15-leaf HGB, which refits
-from the complete revealed history. The optional `river-hoeffding` backend is a
-River 0.21.2 `HoeffdingTreeClassifier` with maximum depth 4, grace period 200,
-and weighted `learn_one` updates. The latter preserves IGW inverse-propensity
-weights and is applied to both ETC and IGW Tree so their tree family remains
-matched. The IGW Linear backend instead fits a revealed-history weighted
-`StandardScaler` followed by IPS-weighted L2 logistic regression using every
-feature. IGW Linear is unaffected by the tree-backend option. Aggregated
-Mondrian forests were not added
-because River's implementation does not accept the per-example weights required
-by this IGW estimator.
+The ETC HGB backend is always the established scikit-learn 15-leaf HGB and uses
+unit-weight prefix data. The `--tree-estimator` option controls IGW Tree only:
+its default HGB refits from complete revealed history, while optional
+`river-hoeffding` uses a River 0.21.2 `HoeffdingTreeClassifier` with maximum
+depth 4, grace period 200, and weighted `learn_one` updates that preserve IGW
+inverse-propensity weights. The shared logistic backend fits a weighted
+`StandardScaler` followed by L2 logistic regression using every feature.
+ETC Linear supplies unit weights from the forced prefix; IGW Linear supplies
+inverse-propensity weights from its own revealed history. Neither linear policy
+is affected by the tree-backend option. Aggregated Mondrian forests were not
+added because River's implementation does not accept the per-example weights
+required by the IGW estimator.
 
 ### `tuning.py`
 
@@ -187,29 +188,49 @@ The `tune-llm-routing` entry point owns the exploratory pointwise multiplier
 sweep. Its module form is `python -m llm_routing_simulation.tuning`. It uses all
 138 manifest-defined BoolQ features, the ascending `l01` grid, 20 paired order
 seeds, and multipliers `0.1, 0.3, 1, 3, 10`. The three base rules are CBPSide
-beta scale 0.5 with a separately fixed cap of 0.5, IGW `gamma=sqrt(n)`, and ETC
-`n^(2/3)` tastes with `ceil(multiplier * base)` applied afterward.
+beta scale 0.5 with a separately fixed cap of 0.5, IGW `gamma=sqrt(n)`, and the
+shared ETC HGB/ETC Linear budget `n^(2/3)` tastes with
+`ceil(multiplier * base)` applied afterward.
 
 The tuner exposes two IGW curves for a controlled estimator comparison. IGW
 Tree uses the nonlinear HGB primary by default; IGW Linear uses regularized
 linear logistic regression. They share the complete 138D context, paired order,
-gamma candidate, `mu`, policy random numbers, cold-start rule, doubling
+gamma candidate, `mu`, policy random numbers, cold-start rule, capped-doubling
 schedule, and capped inverse-propensity-weighting rule. At matched gamma, only
 the configured probability estimator differs. Their realized actions can
 diverge, however, so they need not reveal the same feedback rows or realize the
-same propensities and IPS weights. The complete design contains 3,600 learned
-candidate rows: four policies times nine losses times five multipliers times 20
+same propensities and IPS weights. The complete design contains 4,500 learned
+candidate rows: five policies times nine losses times five multipliers times 20
 orders.
 
-Adaptive snapshots change only immediately before global rounds
-`t=1,2,4,8,...`, and each snapshot uses revealed feedback through `t-1`.
-CBPSide freezes both `theta_hat` and `V^-1` within an epoch but evaluates
+Adaptive snapshots for CBPSide, IGW Tree, and IGW Linear change only immediately
+before capped-doubling global-round boundaries by default. Starting at `b=1`,
+the next boundary is `min(2b, b+100)`: the schedule doubles early and then uses
+a maximum boundary gap of 100 rounds. Each snapshot uses revealed feedback
+through `t-1`, and every policy is still evaluated on every round. CBPSide
+freezes both `theta_hat` and `V^-1` within an epoch but evaluates
 `min((0.5 * multiplier) * sqrt(x_t^T V^-1 x_t), 0.5)` on every current context.
-IGW Tree either refits HGB on the complete revealed history or applies the
-buffered weighted River updates at the same boundaries. IGW Linear refits its
-weighted logistic estimator on its own revealed history at those boundaries.
-ETC fits one prefix model per order and multiplier and reuses its probabilities
-across all `l01` values.
+IGW Tree either refits HGB on the complete revealed history or applies buffered
+weighted River updates at the same boundaries. IGW Linear refits its weighted
+logistic estimator on its own revealed history at those boundaries. Passing
+`--adaptive-update-schedule fibonacci` selects Fibonacci boundaries for a new
+revision-5 run, and `--adaptive-update-schedule doubling` selects the original
+`t=1,2,4,8,...` boundary rule for a new revision-5 run.
+`--adaptive-max-round-gap` controls only capped doubling. Neither ETC variant
+uses the adaptive schedule. Completed revision-3 doubling and revision-4
+Fibonacci artifacts retain older configuration fingerprints; current
+revision-5 code cannot resume or plot-only those directories, which require
+their original code revision.
+
+ETC HGB and ETC Linear receive the identical shuffled order, forced prefix,
+taste budget, and unit training weights for a given order and multiplier. If
+the prefix contains at least two rows from each class, each fits once and
+freezes; its probabilities are reused across all `l01` values. If the shared
+prefix fails that feasibility gate, neither estimator is fit and the tail uses
+the Laplace-smoothed prefix prevalence. Candidate rows record the two class
+counts, feasibility flag, and fallback. The two ETC policies independently
+tune and select their pointwise taste multiplier. ETC HGB remains fixed to
+15-leaf HGB even when IGW Tree uses the River sensitivity backend.
 
 Every completed policy/`l01`/multiplier/order candidate is written atomically
 under `checkpoints/`; repeating the same command skips complete candidates.
@@ -225,17 +246,25 @@ best-vs-best comparison. The matched-gamma exports
 common multiplier for a configured estimator contrast. Both views pair the
 outer online order, but neither forces identical realized feedback histories.
 Ties favor the value closest to 1 and then the smaller value. Random is computed
-analytically after ETC selection rather than by an inner Monte Carlo loop and
-is unchanged by the added comparison. The selection and plotted error bars
-reuse the same 20 orders, so these figures are an optimistic exploratory oracle
-envelope, not an unbiased evaluation of a preselected policy.
+analytically after ETC HGB selection rather than by an inner Monte Carlo loop;
+it is not matched to ETC Linear. The selected output therefore contains five
+learned policies plus Random. The selection and plotted error bars reuse the
+same 20 orders, so these figures are an optimistic exploratory oracle envelope,
+not an unbiased evaluation of a preselected policy.
 
-Adding IGW Linear adds 900 online trajectories. Each performs complete-history
-weighted-scaler and `lbfgs` logistic refits at eligible doubling boundaries, so
-the four-policy sweep takes longer than the earlier three-policy design.
-Candidate-level checkpoints make an identical-command resume safe; a changed
-design must use a new output directory. Finalization writes five figures,
-including both the separately tuned and matched-gamma IGW cost-difference plots.
+Relative to the earlier four-policy design, ETC Linear adds 900 candidate rows.
+At `n=12,648`, capped doubling with a 100-round maximum gap has 133 boundaries
+and permits at most 132 adaptive refits after feedback exists. Its full-history
+row-work upper bound is 803,622, `28.06x` Fibonacci, `49.09x` pure doubling,
+and `4.92x` the completed gap-500 configuration, while its final potentially
+stale tail is 21 rounds instead of 137, 1,703, or 4,457. This is a very large
+runtime increase. Candidate-level checkpoints make an identical-command resume
+safe; this configuration must use a fresh output directory. Finalization writes
+five figures, including both the separately tuned and matched-gamma IGW
+cost-difference plots. The gap-500 revision-5 sweep completed all 4,500
+candidate rows; its numerical results were not analyzed during the gap-100
+code change. The gap-100 configuration is planned and implemented but has not
+been run as a full experiment.
 
 ### `prompt_embeddings.py`
 
@@ -277,12 +306,19 @@ or environment interfaces.
   whose plots show sample variability across paired online permutations.
   Adaptive CBPSide and IGW model fits are batched every five new tastes; ETC is
   still fitted once and frozen. Its separate pointwise tuning path uses 20
-  paired orders, strict global-round doubling epochs, candidate-level resume,
-  matched IGW Tree and IGW Linear policies, and an optional weighted River
-  Hoeffding-tree sensitivity analysis without changing the established HGB
-  nonlinear primary. It exports both separately tuned best-vs-best and
-  fixed-multiplier matched-gamma IGW comparisons; action-dependent histories
-  may differ in either view.
+  paired orders and candidate-level resume. Revision-3 pure-doubling and
+  revision-4 Fibonacci artifacts were completed, although their numerical
+  results were not analyzed during the revision-5 code change. Its completed
+  revision-5 gap-500 artifacts are retained, while the current planned, unrun
+  revision-5 study uses default capped-doubling global-round
+  epochs with a 100-round maximum gap for CBPSide and both IGW variants, keeps
+  explicit Fibonacci and pure-doubling boundary choices for new revision-5
+  comparisons, retains independently tuned ETC Linear beside fixed 15-leaf
+  ETC HGB, and keeps the
+  matched IGW Tree/IGW Linear comparison. The optional weighted River
+  Hoeffding sensitivity changes IGW Tree only. It exports both separately tuned
+  best-vs-best and fixed-multiplier matched-gamma IGW comparisons;
+  action-dependent histories may differ in either view.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather
 than inferring research intent from implementation details alone.
