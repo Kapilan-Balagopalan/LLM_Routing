@@ -1221,8 +1221,8 @@ Completed primary command:
 
 The gap-32 output directory is protected by a configuration fingerprint.
 Current revision-5 code can resume it or use `--plot-only` only when every
-scientific option above and this exact directory are reused. Do not point the
-new gap-8 run at any completed capped-doubling directory.
+scientific option above and this exact directory are reused. Do not point a
+different gap or multiplier grid at this completed directory.
 
 The read-only completion check found exactly 4,500 candidate checkpoints plus
 the finalized reusable tables, five figures, summary, and ZIP bundle in
@@ -1234,11 +1234,16 @@ default from gap 32 to gap 8.
 
 Branch: `experiment/boolq-cbpside-beta1`
 
-Status: implemented as the next planned configuration, but no full gap-8
-experiment has been run and no numerical result is recorded. This revision
-supersedes gap 32 only as the default for the next run. The completed gap-500,
-gap-100, and gap-32 artifacts remain preserved and usable with their exact
-revision-5 options and original directories.
+Status: an incomplete five-multiplier run exists. A read-only check on
+2026-09-15 found 3,902 of 4,500 candidate checkpoints plus the manifest and
+paired-order permutations in
+`boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap08-results`.
+There are no finalized tables, figures, summary, or ZIP, and no numerical
+metrics were inspected. This configuration temporarily superseded gap 32 as
+the default, but the next study returns to gap 32 with a wider multiplier grid.
+The completed gap-500, gap-100, and gap-32 five-multiplier artifacts remain
+preserved and usable with their exact revision-5 options and original
+directories.
 
 This revision changes only the capped-doubling maximum boundary gap from 32 to
 8 global rounds. All other inputs remain unchanged: 12,648 eligible BoolQ rows,
@@ -1249,7 +1254,7 @@ and cap 0.5, IGW base `gamma=sqrt(n)` and `mu=2`, ETC base `n^(2/3)`, 15-leaf
 HGB, ETCLinear, IGW Linear, capped IGW inverse-propensity weights, pointwise
 independent selection, and Random matched only to selected ETC HGB traffic.
 
-Starting with boundary `b=1`, the default schedule now sets
+Starting with boundary `b=1`, this attempted schedule set
 
 ```text
 next boundary = min(2*b, b + 8)
@@ -1285,12 +1290,12 @@ explicitly use its original output directory with
 candidate rows; changing the adaptive gap does not alter ETC fitting,
 selection, outputs, or the analytic Random construction.
 
-Planned primary command; implementation and documentation work did not run it:
+Command corresponding to the incomplete artifacts:
 
 ```powershell
 .\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap8-results `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap08-results `
   --context-profile all-features `
   --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
   --multipliers 0.1 0.3 1 3 10 `
@@ -1307,13 +1312,121 @@ Planned primary command; implementation and documentation work did not run it:
   --policy-seed 0
 ```
 
-The fresh gap-8 output directory is required because the maximum gap is part
-of the configuration fingerprint. Resume and `--plot-only` must reuse every
-scientific option and this exact directory. Do not point the gap-8 run at any
-completed capped-doubling directory.
+The gap-8 directory is protected by its configuration fingerprint. It can be
+resumed only with every scientific option in the command above, including the
+five-value multiplier grid and explicit gap 8. It cannot be reused for the new
+gap-32/seven-multiplier design. No finalized numerical result is recorded for
+this incomplete attempt.
 
-No full sweep, pilot, or numerical-result inspection was performed for the
-gap-8 change.
+### BoolQ 138D gap-32 seven-multiplier tuning revision, 2026-09-15
+
+Branch: `experiment/boolq-cbpside-beta1`
+
+Status: implemented as the next planned configuration; no full experiment was
+run during implementation and no numerical result is recorded. This study
+returns the capped-doubling maximum gap to 32 and widens the common multiplier
+grid from five values to seven:
+
+```text
+m = 0.03, 0.1, 0.3, 1, 3, 10, 30
+```
+
+Everything else remains fixed: all 12,648 eligible BoolQ examples are online
+rounds, all 138 manifest-defined features are used, cached weak/strong
+disagreement is the routing outcome, cached strong answers are the routing
+reference, and BoolQ gold labels are not routing labels. The nine ascending
+`l01` values, 20 paired shuffled orders, policy seed 0, CBPSide base scale 0.5
+and cap 0.5, IGW base `gamma=sqrt(n)` and `mu=2`, ETC base `n^(2/3)`, fixed
+15-leaf HGB, ETCLinear, IGW Linear, capped IGW inverse-propensity weights,
+pointwise independent selection, and Random matched only to selected ETC HGB
+traffic also remain unchanged.
+
+CBPSide and both IGW variants use capped-doubling estimator snapshots with
+
+```text
+next boundary = min(2*b, b + 32)
+```
+
+The 400 boundaries begin `1,2,4,8,16,32,64,96,128,...` and end at 12,640,
+permitting at most 399 adaptive refits and leaving a final inclusive stale tail
+of nine rounds. Each policy is still evaluated on every round. A fit before
+boundary `b` uses only feedback revealed through `b-1`, and CBPSide evaluates
+its context-dependent beta on every current context. ETC HGB and ETCLinear are
+not affected by this schedule.
+
+For `n=12,648`, the ETC base is approximately 542.8517 tastes. Applying
+`ceil(m * n^(2/3))` and then capping at the horizon gives:
+
+| Multiplier `m` | Effective ETC tastes |
+|---:|---:|
+| 0.03 | 17 |
+| 0.1 | 55 |
+| 0.3 | 163 |
+| 1 | 543 |
+| 3 | 1,629 |
+| 10 | 5,429 |
+| 30 | 12,648 |
+
+At `m=0.03`, the 17-example prefix is smaller than HGB's 20-sample minimum leaf
+size. ETC HGB therefore cannot split and is a constant prefix-prevalence
+predictor; ETCLinear can still fit when the prefix passes the existing
+two-per-class feasibility gate. At `m=30`, both ETC variants saturate at the
+full online horizon. They route every example to the strong model and have no
+post-prefix routing phase. With `l11=1`, their routing rate is 1, accuracy is 1,
+total cost is 12,648 at every `l01`, and those routing metrics have zero order
+variation. This candidate is retained as a deliberate upper-bound sensitivity
+point. The same multiplier gives CBPSide a pre-cap beta scale of 15 and IGW an
+effective gamma of approximately 3,373.90, but neither of those facts alone
+guarantees an all-strong policy.
+
+The complete design has 6,300 learned candidate rows/checkpoints:
+
+```text
+5 policies * 9 l01 values * 7 multipliers * 20 orders = 6,300
+```
+
+The progress display has 203 candidate groups. ETC HGB and ETCLinear each have
+seven multiplier groups because one frozen prefix probability vector per
+order/multiplier is reused across all nine losses. CBPSide, IGW Linear, and IGW
+Tree each have 63 loss/multiplier groups. Equivalently, the ETC groups run 280
+order tasks and emit 2,520 checkpoints, while the adaptive groups run 3,780
+order tasks/checkpoints. Final aggregation produces 315
+policy/loss/multiplier summaries, 45 learned-policy multiplier selections, 900
+selected learned-policy order rows, and 180 analytic Random order rows. The
+final selected table contains 54 summaries: six curves at nine loss values.
+The matched-gamma IGW comparison contains 1,260 order rows and 63 aggregated
+rows; the separately tuned best-vs-best comparison contains 180 order rows and
+nine aggregated rows.
+
+Planned primary command; implementation and documentation work did not run it:
+
+```powershell
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap32-multiplier7-results `
+  --context-profile all-features `
+  --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
+  --multipliers 0.03 0.1 0.3 1 3 10 30 `
+  --online-order-repeats 20 `
+  --adaptive-update-schedule capped-doubling `
+  --adaptive-max-round-gap 32 `
+  --cbpside-base-beta-scale 0.5 `
+  --cbpside-max-confidence-radius 0.5 `
+  --igw-mu 2 `
+  --tree-estimator hgb `
+  --hgb-max-leaf-nodes 15 `
+  --jobs 4 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+The fresh `gap32-multiplier7-results` directory is mandatory. The completed
+`gap32-results` directory has the old five-value multiplier grid and its
+configuration fingerprint must remain untouched. Likewise, the incomplete
+`gap08-results` directory belongs only to the earlier five-multiplier attempt.
+Repeat the exact command above to resume the new study; after all 6,300
+checkpoints exist, add `--plot-only` with every other scientific option
+unchanged to rebuild its final tables and figures.
 
 ### Prompt-only 20D real-label fine-grid study, 2026-09-03
 

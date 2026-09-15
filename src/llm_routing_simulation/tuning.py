@@ -36,10 +36,10 @@ from llm_routing_simulation.run import (
 )
 
 
-DEFAULT_MULTIPLIERS = (0.1, 0.3, 1.0, 3.0, 10.0)
+DEFAULT_MULTIPLIERS = (0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0)
 ADAPTIVE_UPDATE_SCHEDULES = ("capped-doubling", "fibonacci", "doubling")
 DEFAULT_ADAPTIVE_UPDATE_SCHEDULE = "capped-doubling"
-DEFAULT_ADAPTIVE_MAX_ROUND_GAP = 8
+DEFAULT_ADAPTIVE_MAX_ROUND_GAP = 32
 TUNING_IMPLEMENTATION_REVISION = 5
 POLICY_CBPSIDE = "CBPSide"
 POLICY_ETC = "ETC"
@@ -119,7 +119,7 @@ def _parser() -> argparse.ArgumentParser:
         "--adaptive-max-round-gap",
         type=int,
         default=DEFAULT_ADAPTIVE_MAX_ROUND_GAP,
-        help="Maximum boundary gap for capped doubling (default: 8 rounds)",
+        help="Maximum boundary gap for capped doubling (default: 32 rounds)",
     )
     parser.add_argument(
         "--plot-only",

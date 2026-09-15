@@ -187,9 +187,9 @@ required by the IGW estimator.
 The `tune-llm-routing` entry point owns the exploratory pointwise multiplier
 sweep. Its module form is `python -m llm_routing_simulation.tuning`. It uses all
 138 manifest-defined BoolQ features, the ascending `l01` grid, 20 paired order
-seeds, and multipliers `0.1, 0.3, 1, 3, 10`. The three base rules are CBPSide
-beta scale 0.5 with a separately fixed cap of 0.5, IGW `gamma=sqrt(n)`, and the
-shared ETC HGB/ETC Linear budget `n^(2/3)` tastes with
+seeds, and multipliers `0.03, 0.1, 0.3, 1, 3, 10, 30`. The three base rules are
+CBPSide beta scale 0.5 with a separately fixed cap of 0.5, IGW
+`gamma=sqrt(n)`, and the shared ETC HGB/ETC Linear budget `n^(2/3)` tastes with
 `ceil(multiplier * base)` applied afterward.
 
 The tuner exposes two IGW curves for a controlled estimator comparison. IGW
@@ -199,14 +199,14 @@ gamma candidate, `mu`, policy random numbers, cold-start rule, capped-doubling
 schedule, and capped inverse-propensity-weighting rule. At matched gamma, only
 the configured probability estimator differs. Their realized actions can
 diverge, however, so they need not reveal the same feedback rows or realize the
-same propensities and IPS weights. The complete design contains 4,500 learned
-candidate rows: five policies times nine losses times five multipliers times 20
-orders.
+same propensities and IPS weights. The complete design contains 6,300 learned
+candidate rows: five policies times nine losses times seven multipliers times
+20 orders.
 
 Adaptive snapshots for CBPSide, IGW Tree, and IGW Linear change only immediately
 before capped-doubling global-round boundaries by default. Starting at `b=1`,
-the next boundary is `min(2b, b+8)`: the schedule doubles early and then uses
-a maximum boundary gap of 8 rounds. Each snapshot uses revealed feedback
+the next boundary is `min(2b, b+32)`: the schedule doubles early and then uses
+a maximum boundary gap of 32 rounds. Each snapshot uses revealed feedback
 through `t-1`, and every policy is still evaluated on every round. CBPSide
 freezes both `theta_hat` and `V^-1` within an epoch but evaluates
 `min((0.5 * multiplier) * sqrt(x_t^T V^-1 x_t), 0.5)` on every current context.
@@ -252,21 +252,31 @@ learned policies plus Random. The selection and plotted error bars reuse the
 same 20 orders, so these figures are an optimistic exploratory oracle envelope,
 not an unbiased evaluation of a preselected policy.
 
-Relative to the earlier four-policy design, ETC Linear adds 900 candidate rows.
-At `n=12,648`, capped doubling with an 8-round maximum gap has 1,584 boundaries
-and permits at most 1,583 adaptive refits after feedback exists. Its last
-boundary is round 12,648. The full-history row-work upper bound is 10,002,991,
-`349.33x` Fibonacci, `611.09x` pure doubling, `61.26x` the completed gap-500
-configuration, `12.45x` gap 100, and `4.00x` gap 32, while its final potentially
-stale tail is one round instead of 9, 21, 137, 1,703, or 4,457. This is an
-extremely large runtime increase.
-Candidate-level checkpoints make an identical-command resume safe; this
-configuration must use a fresh output directory. Finalization writes five
+Relative to a corresponding four-policy seven-multiplier design, ETC Linear
+adds 1,260 candidate rows. The 6,300 checkpoints are generated through 203
+reported execution groups: seven groups for each ETC estimator and 63 groups
+for each adaptive policy. Aggregation produces 315 policy/loss/multiplier rows,
+45 selected learned-policy points, and 54 final policy-plus-Random summaries.
+The matched-gamma IGW comparison has 1,260 order-level rows and 63 aggregated
+rows.
+
+At `n=12,648`, capped doubling with a 32-round maximum gap has 400 boundaries
+and permits at most 399 adaptive refits after feedback exists. Its last
+boundary is round 12,640, its final potentially stale tail is nine rounds, and
+its full-history row-work upper bound is 2,502,351. The new `m=0.03` ETC budget
+is 17 tastes, below HGB's 20-sample minimum leaf size, so ETC HGB cannot split.
+The `m=30` budget is capped at the complete 12,648-round horizon, so both ETC
+variants route every example strongly and have no tail-routing phase. Their
+`l11=1` routing metrics are identical across losses and orders.
+
+Candidate-level checkpoints make an identical-command resume safe, but the
+new seven-multiplier configuration must use a fresh output directory rather
+than the completed five-multiplier gap-32 directory. Finalization writes five
 figures, including both the separately tuned and matched-gamma IGW
 cost-difference plots. The gap-500, gap-100, and gap-32 revision-5 sweeps each
-completed all 4,500 candidate rows; their numerical results were not analyzed
-during the gap-8 code change. The gap-8 configuration is planned and
-implemented but has not been run as a full experiment.
+completed all 4,500 five-multiplier candidate rows; their numerical results were
+not analyzed during the subsequent schedule changes. A gap-8 attempt contains
+3,902 of 4,500 checkpoints and no finalized tables, figures, summary, or ZIP.
 
 ### `prompt_embeddings.py`
 
@@ -311,13 +321,15 @@ or environment interfaces.
   paired orders and candidate-level resume. Revision-3 pure-doubling and
   revision-4 Fibonacci artifacts were completed, although their numerical
   results were not analyzed during the revision-5 code change. Its completed
-  revision-5 gap-500, gap-100, and gap-32 artifacts are retained, while the
-  current planned, unrun revision-5 study uses default capped-doubling
-  global-round epochs with an 8-round maximum gap for CBPSide and both IGW
-  variants, keeps explicit Fibonacci and pure-doubling boundary choices for
-  new revision-5 comparisons, retains independently tuned ETC Linear beside
-  fixed 15-leaf ETC HGB, and keeps the
-  matched IGW Tree/IGW Linear comparison. The optional weighted River
+  revision-5 gap-500, gap-100, and gap-32 five-multiplier artifacts are retained.
+  A later gap-8 attempt is incomplete at 3,902 of 4,500 checkpoints. The current
+  planned revision-5 study returns to default capped-doubling global-round
+  epochs with a 32-round maximum gap for CBPSide and both IGW variants and
+  expands the common multiplier grid to
+  `0.03, 0.1, 0.3, 1, 3, 10, 30`. It keeps explicit Fibonacci and pure-doubling
+  boundary choices for new revision-5 comparisons, retains independently tuned
+  ETC Linear beside fixed 15-leaf ETC HGB, and keeps the matched IGW Tree/IGW
+  Linear comparison. The optional weighted River
   Hoeffding sensitivity changes IGW Tree only. It exports both separately tuned
   best-vs-best and fixed-multiplier matched-gamma IGW comparisons;
   action-dependent histories may differ in either view.

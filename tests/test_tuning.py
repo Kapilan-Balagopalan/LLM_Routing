@@ -101,42 +101,42 @@ def test_adaptive_epochs_update_before_boundaries_without_gaps(
     assert all(boundary - 1 == start for boundary, start, _ in epochs)
 
 
-def test_capped_doubling_limits_late_boundary_gaps_to_8_rounds():
+def test_capped_doubling_limits_late_boundary_gaps_to_32_rounds():
     expected_boundaries = [
         1,
         2,
         4,
         8,
         16,
-        24,
         32,
-        40,
-        48,
-        56,
+        64,
+        96,
+        128,
+        160,
     ]
     expected_epochs = [
         (1, 0, 1),
         (2, 1, 3),
         (4, 3, 7),
         (8, 7, 15),
-        (16, 15, 23),
-        (24, 23, 31),
-        (32, 31, 39),
-        (40, 39, 47),
-        (48, 47, 55),
-        (56, 55, 60),
+        (16, 15, 31),
+        (32, 31, 63),
+        (64, 63, 95),
+        (96, 95, 127),
+        (128, 127, 159),
+        (160, 159, 160),
     ]
 
-    assert list(tuning._schedule_boundaries(60, "capped-doubling")) == (
+    assert list(tuning._schedule_boundaries(160, "capped-doubling")) == (
         expected_boundaries
     )
-    assert list(tuning._adaptive_epochs(60, "capped-doubling")) == (
+    assert list(tuning._adaptive_epochs(160, "capped-doubling")) == (
         expected_epochs
     )
     assert max(
         later - earlier
         for earlier, later in zip(expected_boundaries, expected_boundaries[1:])
-    ) == 8
+    ) == 32
 
 
 def test_capped_doubling_honors_a_custom_maximum_round_gap():
@@ -179,9 +179,9 @@ def test_doubling_epochs_remains_a_backward_compatible_explicit_schedule():
     [
         (
             "capped-doubling",
-            8,
+            32,
             [1, 3, 7],
-            "capped_doubling_gap_8",
+            "capped_doubling_gap_32",
         ),
         ("capped-doubling", 3, [1, 3, 6], "capped_doubling_gap_3"),
         ("fibonacci", 500, [1, 2, 4, 7], "fibonacci"),
@@ -244,7 +244,7 @@ def test_cbpside_uses_feedback_only_at_next_scheduled_boundary(
         "expected_slug",
     ),
     [
-        ("capped-doubling", 8, [7], 7, "capped_doubling_gap_8"),
+        ("capped-doubling", 32, [7], 7, "capped_doubling_gap_32"),
         ("capped-doubling", 3, [6], 6, "capped_doubling_gap_3"),
         ("fibonacci", 500, [4, 3], 7, "fibonacci"),
         ("doubling", 500, [7], 7, "doubling"),
@@ -490,6 +490,41 @@ def test_etc_estimators_share_prefix_freeze_and_reuse_tail_across_losses(
     assert all(row["comparison_role"] == "linear_oracle" for row in linear_rows)
 
 
+def test_etc_multiplier_30_caps_the_forced_prefix_at_the_online_horizon(
+    monkeypatch,
+):
+    estimator = _RecordingBatchEstimator()
+    monkeypatch.setattr(
+        tuning, "make_tree_backend", lambda settings, seed: estimator
+    )
+    contexts = np.arange(12, dtype=float).reshape(6, 2)
+    outcomes = np.asarray([0, 1] * 3, dtype=np.int8)
+
+    [row] = tuning._simulate_etc_candidates(
+        contexts,
+        outcomes,
+        np.arange(6),
+        policy=tuning.POLICY_ETC,
+        l01_values=[2.0],
+        l11=1.0,
+        multiplier=30.0,
+        base_tastes=4.0,
+        order_index=0,
+        order_seed=0,
+        policy_seed=3,
+        estimator_settings=_tree_settings("hgb"),
+    )
+
+    assert row["effective_parameter"] == 6.0
+    assert row["forced_taste_rounding"] == (
+        "ceil(multiplier * base_tastes), capped at n"
+    )
+    assert row["routing_rate"] == 1.0
+    assert len(estimator.fit_records) == 1
+    assert len(estimator.fit_records[0][1]) == 6
+    assert estimator.predict_records == []
+
+
 @pytest.mark.parametrize(
     ("policy", "settings"),
     [
@@ -716,7 +751,7 @@ def test_parser_keeps_established_hgb_as_explicit_default():
     assert args.tree_estimator == "hgb"
     assert args.hgb_max_leaf_nodes == 15
     assert args.adaptive_update_schedule == "capped-doubling"
-    assert args.adaptive_max_round_gap == 8
+    assert args.adaptive_max_round_gap == 32
     assert fibonacci_args.adaptive_update_schedule == "fibonacci"
     assert doubling_args.adaptive_update_schedule == "doubling"
     assert tuning._tree_settings(doubling_args)["kind"] == "river-hoeffding"
@@ -725,8 +760,8 @@ def test_parser_keeps_established_hgb_as_explicit_default():
         "hgb_max_leaf_nodes": 15,
     }
     assert args.online_order_repeats == 20
-    assert args.multipliers == [0.1, 0.3, 1.0, 3.0, 10.0]
-    assert tuning._expected_checkpoint_count(args) == 4500
+    assert args.multipliers == [0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0]
+    assert tuning._expected_checkpoint_count(args) == 6300
 
 
 def test_manifest_fingerprint_covers_contexts_and_cbpside_regularization(tmp_path):
@@ -791,10 +826,10 @@ def test_manifest_fingerprint_covers_contexts_and_cbpside_regularization(tmp_pat
     assert manifest["tuned_policies"] == list(tuning.TUNED_POLICIES)
     assert manifest["update_schedule"] == {
         "name": "capped-doubling",
-        "maximum_round_gap": 8,
+        "maximum_round_gap": 32,
         "boundary_rule": (
             "before global rounds starting at 1, with "
-            "next=min(2*current, current+8)"
+            "next=min(2*current, current+32)"
         ),
         "boundary_rounds": [1, 2, 4, 8],
         "boundary_count": 4,
@@ -972,7 +1007,7 @@ def test_small_end_to_end_sweep_resumes_and_plot_only_uses_checkpoints(
         (output / "sweep_manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["update_schedule"]["name"] == "capped-doubling"
-    assert manifest["update_schedule"]["maximum_round_gap"] == 8
+    assert manifest["update_schedule"]["maximum_round_gap"] == 32
     assert manifest["update_schedule"]["boundary_rounds"] == [1, 2, 4, 8]
     assert manifest["tuned_policies"] == list(tuning.TUNED_POLICIES)
     candidate_rows = json.loads(
@@ -997,7 +1032,7 @@ def test_small_end_to_end_sweep_resumes_and_plot_only_uses_checkpoints(
         rows = [row for row in candidate_rows if row["policy"] == policy]
         assert all(
             row["update_schedule"]
-            == "global_round_capped_doubling_gap_8_before_action"
+            == "global_round_capped_doubling_gap_32_before_action"
             for row in rows
         )
     selected = json.loads(

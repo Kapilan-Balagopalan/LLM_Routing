@@ -23,9 +23,10 @@
   online orders with sample-SD error bars. CBPSide and IGW refit after every
   five additional tastes; ETC still fits once and freezes. The separate
   `tune-llm-routing` study extends this baseline to 20 paired orders and
-  pointwise multipliers `0.1, 0.3, 1, 3, 10`, using resumable candidate
-  checkpoints. Completed revision-3 pure-doubling and revision-4 Fibonacci
-  artifacts are retained in their original fingerprinted output directories;
+  pointwise multipliers `0.03, 0.1, 0.3, 1, 3, 10, 30`, using resumable
+  candidate checkpoints. Completed revision-3 pure-doubling and revision-4
+  Fibonacci artifacts are retained in their original fingerprinted output
+  directories;
   their numerical results were not analyzed during the revision-5 code change,
   and current revision-5 code cannot resume or plot-only those directories.
   Use the corresponding original code revision for those archived artifacts.
@@ -36,8 +37,10 @@
   Current revision-5 code can resume or plot-only a completed result only with
   its original output directory and the corresponding explicit
   `--adaptive-max-round-gap 500`, `--adaptive-max-round-gap 100`, or
-  `--adaptive-max-round-gap 32`. The current planned, unrun gap-8 configuration
-  has five tuned policies:
+  `--adaptive-max-round-gap 32`. A later gap-8 attempt contains 3,902 of its
+  planned 4,500 checkpoints and no finalized tables, summary, figures, or ZIP;
+  preserve it as an incomplete five-multiplier artifact. The current planned,
+  unrun gap-32/seven-multiplier configuration has five tuned policies:
   CBPSide, fixed 15-leaf HGB ETC, ETCLinear, IGW Tree, and IGW Linear. The two
   ETC variants share each shuffled order, forced prefix, taste budget, and unit
   training weights; each feasible prefix fits once, freezes, reuses
@@ -46,7 +49,7 @@
   Laplace-smoothed prevalence fallback without fitting. Random is matched only
   to selected HGB ETC traffic. CBPSide and both IGW variants now default to
   capped-doubling global-round boundaries: start at 1 and set the next boundary
-  to `min(2b, b+8)`. Fit before boundary `b` using feedback through `b-1`,
+  to `min(2b, b+32)`. Fit before boundary `b` using feedback through `b-1`,
   while evaluating the policy every round. The ETC variants are unaffected by
   this schedule. Use `--adaptive-update-schedule fibonacci` or
   `--adaptive-update-schedule doubling` to select those boundary rules for a
@@ -54,15 +57,15 @@
   Report both separately tuned best-vs-best and fixed-multiplier
   matched-gamma IGW comparisons; actions and realized feedback may diverge.
   HGB remains the nonlinear primary and `river-hoeffding` changes IGW Tree
-  only. The design has 4,500 candidate rows and selects five learned policies
-  plus Random. At `n=12,648`, capped doubling with gap 8 has 1,584 boundaries
-  and at most 1,583 adaptive refits. Its last boundary is 12,648, so its final
-  potentially stale tail is one round. Its 10,002,991 full-history row-work
-  upper bound is `349.33x` Fibonacci, `611.09x` pure doubling, `61.26x` the
-  completed gap-500 configuration, `12.45x` gap 100, and `4.00x` gap 32. This
-  is an extremely large runtime increase. Use the fresh
-  `boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap8-results`
-  directory.
+  only. The design has 6,300 candidate rows/checkpoints and selects five learned
+  policies plus Random. Execution reports 203 candidate groups: seven for each
+  ETC estimator and 63 for each of the three adaptive policies. At `n=12,648`,
+  capped doubling with gap 32 has 400 boundaries and at most 399 adaptive
+  refits. Its last boundary is 12,640, so its final potentially stale tail is
+  nine rounds. Multiplier 30 makes each ETC forced-taste budget saturate at the
+  12,648-round horizon. Use the fresh
+  `boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap32-multiplier7-results`
+  directory; never reuse the completed five-multiplier gap-32 directory.
 - `backup/current-combined`: recovery snapshot made before branch separation.
 
 Do not mix an experiment into another branch. Shared bug fixes should be made

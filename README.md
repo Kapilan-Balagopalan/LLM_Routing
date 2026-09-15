@@ -15,11 +15,14 @@ routing performance. A separate resumable multiplier tuner is now available
 for 20-order studies. Completed revision-3 pure-doubling, revision-4
 Fibonacci, and revision-5 capped-doubling gap-500, gap-100, and gap-32 artifacts
 remain in their original fingerprinted directories, but their numerical results
-were not analyzed during the later schedule code changes. The current planned,
-unrun revision-5 gap-8 study retains ETCLinear beside the fixed 15-leaf HGB ETC
-and the matched IGW Linear versus IGW Tree comparison. Adaptive tuner refits now
-default to capped exponential doubling: the next global-round boundary is
-`min(2b, b+8)`.
+were not analyzed during the later schedule code changes. A subsequent gap-8
+attempt was incomplete at 3,902 of 4,500 checkpoints in the 2026-09-15
+read-only audit and had no finalized outputs.
+The current planned, unrun revision-5 study returns to gap 32, retains ETCLinear
+beside the fixed 15-leaf HGB ETC and the matched IGW Linear versus IGW Tree
+comparison, and expands the common multiplier grid to seven values. Adaptive
+tuner refits now default to capped exponential doubling: the next global-round
+boundary is `min(2b, b+32)`.
 This does not alter the established simulator.
 
 For experiment history and conclusions, read [EXPERIMENTS.md](EXPERIMENTS.md).
@@ -140,7 +143,7 @@ given. It does not run the supervised skyline.
 
 For every policy and every ascending loss value
 `l01 = 1.8, 2.0, 2.2, 2.4, 2.6, 2.8, 3.0, 3.2, 3.3`, the tuner compares
-multipliers `0.1, 0.3, 1, 3, 10` on the same 20 shuffled orders:
+multipliers `0.03, 0.1, 0.3, 1, 3, 10, 30` on the same 20 shuffled orders:
 
 | Policy | Base parameter | Multiplier rule |
 |---|---:|---|
@@ -153,8 +156,8 @@ multipliers `0.1, 0.3, 1, 3, 10` on the same 20 shuffled orders:
 The 20 order seeds are paired across policies, losses, and multipliers. Model
 snapshots for CBPSide, IGW Tree, and IGW Linear change immediately before
 capped-doubling global rounds by default. Starting at `b=1`, each next boundary
-is `min(2b, b+8)`, so the schedule doubles early and then limits boundary
-gaps to 8 rounds. Each snapshot uses only feedback through `t-1`, and the
+is `min(2b, b+32)`, so the schedule doubles early and then limits boundary
+gaps to 32 rounds. Each snapshot uses only feedback through `t-1`, and the
 policy is still evaluated on every round. CBPSide freezes
 `theta_hat` and `V^-1` within each epoch, while its context-dependent beta is
 still evaluated for every current `x_t`. IGW Tree refits the default HGB on its
@@ -197,29 +200,31 @@ Because the same 20 orders are used to select and display the winner, this is
 an exploratory, optimistic oracle envelope. A later confirmatory study should
 evaluate preselected multipliers on fresh order seeds.
 
-### Full HGB/ETC-linear capped-doubling gap-8 sweep
+### Full HGB/ETC-linear gap-32 seven-multiplier sweep
 
 HGB with 15 maximum leaves remains the default so this sweep is directly
 comparable with the established routing experiments and remains the nonlinear
 primary for ETC HGB and IGW Tree. The same run evaluates ETC Linear and IGW
 Linear automatically. Across CBPSide, ETC HGB, ETC Linear, IGW Tree, and IGW
-Linear, the full design produces 4,500 learned candidate rows
-(`5 * 9 * 5 * 20`) before adding analytic Random. Final selection retains five
-learned policies plus Random. The base gamma and ETC taste count are
-intentionally omitted below so they are derived from the eligible online
-horizon. This 2026-09-13 revision is implemented but has not been run as a full
-experiment.
+Linear, the full design produces 6,300 learned candidate rows/checkpoints
+(`5 * 9 * 7 * 20`) before adding analytic Random. The runner reports 203
+candidate groups: seven groups for ETC HGB, seven for ETC Linear, and 63
+loss/multiplier groups for each of CBPSide, IGW Tree, and IGW Linear. Final
+selection retains five learned policies plus Random. The base gamma and ETC
+taste count are intentionally omitted below so they are derived from the
+eligible online horizon. This 2026-09-15 revision is implemented but has not
+been run as a full experiment.
 
 ```powershell
 .\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap8-results `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap32-multiplier7-results `
   --context-profile all-features `
   --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
-  --multipliers 0.1 0.3 1 3 10 `
+  --multipliers 0.03 0.1 0.3 1 3 10 30 `
   --online-order-repeats 20 `
   --adaptive-update-schedule capped-doubling `
-  --adaptive-max-round-gap 8 `
+  --adaptive-max-round-gap 32 `
   --cbpside-base-beta-scale 0.5 `
   --cbpside-max-confidence-radius 0.5 `
   --igw-mu 2 `
@@ -230,26 +235,34 @@ experiment.
   --policy-seed 0
 ```
 
-Relative to the earlier four-policy design, ETC Linear adds 900 candidate rows
-(`9 * 5 * 20`). It uses at most one unit-weight prefix fit per order/multiplier
-and then reuses frozen probabilities across losses. At `n=12,648`, capped
-doubling with an 8-round gap has 1,584 boundaries and permits at most 1,583
-adaptive refits after feedback exists. Its last boundary is round 12,648. The
-repeated full-history row-work upper bound is 10,002,991, which is `349.33x`
-the Fibonacci upper bound, `611.09x` pure doubling, `61.26x` the completed
-gap-500 configuration, `12.45x` gap 100, and `4.00x` gap 32. In exchange, its
-final potentially stale tail is only one round, versus 9 for gap 32, 21 for gap
-100, 137 for gap 500, 1,703 for Fibonacci, and 4,457 for pure doubling. This is
-an extremely large runtime increase;
-the actual number of fits can be lower when no new tastes arrive or both
-classes are not yet available. Use the fresh capped-doubling output directory
-shown above; older outputs have a different configuration fingerprint and
-cannot be mixed with this run. The completed gap-500, gap-100, and gap-32
-directories remain valid revision-5 results: use each original directory and
-explicitly pass its corresponding `--adaptive-max-round-gap 500`,
-`--adaptive-max-round-gap 100`, or `--adaptive-max-round-gap 32` to resume or
-rebuild its plots. Once the gap-8 run is started, rerun the identical gap-8
-command to resume its completed candidate checkpoints.
+Relative to a corresponding four-policy seven-multiplier design, ETC Linear
+adds 1,260 candidate rows (`9 * 7 * 20`). It uses at most one unit-weight
+prefix fit per order/multiplier and then reuses frozen probabilities across
+losses. At `n=12,648`, capped doubling with a 32-round gap has 400 boundaries
+and permits at most 399 adaptive refits after feedback exists. Its last
+boundary is round 12,640, the final potentially stale tail is nine rounds, and
+the repeated full-history row-work upper bound is 2,502,351. The actual number
+of fits can be lower when no new tastes arrive or both classes are not yet
+available.
+
+The new endpoint `m=0.03` gives ETC 17 forced tastes. That is below HGB's
+20-sample minimum leaf size, so ETC HGB cannot split and acts as a constant
+prefix-prevalence predictor; ETC Linear can still fit when the prefix passes
+the existing two-per-class feasibility gate. At `m=30`, the computed ETC
+budget exceeds the horizon and is capped at all 12,648 rounds. Both ETC variants
+then route every example to the strong model and have no post-prefix routing
+phase. With `l11=1`, both have routing rate 1, accuracy 1, total cost 12,648,
+and zero order variation. This saturated endpoint is retained as an explicit
+upper-bound sensitivity candidate.
+
+Use the fresh output directory shown above. The completed five-multiplier
+gap-32 directory has a different multiplier grid and must not be reused. The
+`boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap08-results`
+directory is also preserved: a read-only check on 2026-09-15 found 3,902 of
+4,500 checkpoints, `sweep_manifest.json`, and the order permutations, but no
+final tables, figures, summary, or ZIP. It remains resumable only with its
+original five multipliers and explicit `--adaptive-max-round-gap 8`; it is not
+part of the new seven-multiplier study.
 
 Each completed policy/`l01`/multiplier/order candidate is saved atomically.
 If the run is interrupted, repeat the exact command above with the same output
@@ -264,14 +277,14 @@ check, not a research result, and implementation work does not run it:
 ```powershell
 .\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap8-pilot `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap32-multiplier7-pilot `
   --context-profile all-features `
   --limit 500 `
   --l01-values 1.8 2.6 3.3 `
-  --multipliers 0.3 1 3 `
+  --multipliers 0.03 1 30 `
   --online-order-repeats 2 `
   --adaptive-update-schedule capped-doubling `
-  --adaptive-max-round-gap 8 `
+  --adaptive-max-round-gap 32 `
   --tree-estimator hgb `
   --hgb-max-leaf-nodes 15 `
   --jobs 1 `
@@ -285,13 +298,13 @@ any policy again:
 ```powershell
 .\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap8-results `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap32-multiplier7-results `
   --context-profile all-features `
   --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
-  --multipliers 0.1 0.3 1 3 10 `
+  --multipliers 0.03 0.1 0.3 1 3 10 30 `
   --online-order-repeats 20 `
   --adaptive-update-schedule capped-doubling `
-  --adaptive-max-round-gap 8 `
+  --adaptive-max-round-gap 32 `
   --cbpside-base-beta-scale 0.5 `
   --cbpside-max-confidence-radius 0.5 `
   --igw-mu 2 `
@@ -317,14 +330,14 @@ First measure correctness and runtime on this non-scientific pilot:
 ```powershell
 .\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-river-igw-etc-linear-capped-doubling-gap8-pilot `
+  --output-dir .\boolq-138d-multiplier-sweep-river-igw-etc-linear-capped-doubling-gap32-multiplier7-pilot `
   --context-profile all-features `
   --limit 500 `
   --l01-values 1.8 2.6 3.3 `
-  --multipliers 0.3 1 3 `
+  --multipliers 0.03 1 30 `
   --online-order-repeats 2 `
   --adaptive-update-schedule capped-doubling `
-  --adaptive-max-round-gap 8 `
+  --adaptive-max-round-gap 32 `
   --tree-estimator river-hoeffding `
   --river-max-depth 4 `
   --river-grace-period 200 `
@@ -339,13 +352,13 @@ new output directory:
 ```powershell
 .\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-river-igw-etc-linear-capped-doubling-gap8-results `
+  --output-dir .\boolq-138d-multiplier-sweep-river-igw-etc-linear-capped-doubling-gap32-multiplier7-results `
   --context-profile all-features `
   --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
-  --multipliers 0.1 0.3 1 3 10 `
+  --multipliers 0.03 0.1 0.3 1 3 10 30 `
   --online-order-repeats 20 `
   --adaptive-update-schedule capped-doubling `
-  --adaptive-max-round-gap 8 `
+  --adaptive-max-round-gap 32 `
   --cbpside-base-beta-scale 0.5 `
   --cbpside-max-confidence-radius 0.5 `
   --igw-mu 2 `
@@ -368,22 +381,22 @@ variants still fit once and freeze. Rerun the same command to resume, or add
 | File | Contents |
 |---|---|
 | `sweep_manifest.json` | Complete design, derived bases, epoch semantics, data fingerprint, and selection warning |
-| `checkpoints/` | Atomic candidate-level rows used for interruption-safe resume |
+| `checkpoints/` | All 6,300 atomic candidate-level rows used for interruption-safe resume |
 | `online_order_permutations.npz` | The exact 20 paired permutations and seeds |
-| `candidate_results_by_order.csv/json` | All 4,500 learned policy/loss/multiplier/order results |
-| `candidate_results.csv/json` | Candidate means, sample SDs, and standard errors |
-| `selected_multipliers.csv/json` | Pointwise winning multiplier and effective parameter for all five learned policies, including independent ETC HGB/ETC Linear and IGW Tree/IGW Linear choices |
-| `selected_results_by_order.csv/json` | Five selected learned-policy rows plus analytic Random matched only to selected ETC HGB traffic |
-| `selected_results.csv/json` | Final across-order summaries used for plots |
-| `igw_tree_vs_linear_by_order.csv/json` | Separately tuned best-vs-best IGW differences on each paired order; selected gammas may differ |
-| `igw_tree_vs_linear.csv/json` | Across-order mean, SD, and SEM for that separately tuned comparison |
-| `igw_tree_vs_linear_matched_by_order.csv/json` | Tree-versus-linear differences at each common gamma multiplier and paired order |
-| `igw_tree_vs_linear_matched.csv/json` | Across-order matched-gamma means, SDs, and SEMs by `l01` and multiplier |
+| `candidate_results_by_order.csv/json` | All 6,300 learned policy/loss/multiplier/order results |
+| `candidate_results.csv/json` | 315 policy/loss/multiplier means, sample SDs, and standard errors |
+| `selected_multipliers.csv/json` | 45 pointwise winners: nine losses for each of five learned policies, including independent ETC HGB/ETC Linear and IGW Tree/IGW Linear choices |
+| `selected_results_by_order.csv/json` | 1,080 rows: five selected learned policies plus analytic Random over nine losses and 20 orders |
+| `selected_results.csv/json` | 54 across-order summaries used for plots: six curves at nine losses |
+| `igw_tree_vs_linear_by_order.csv/json` | 180 separately tuned best-vs-best IGW differences; selected gammas may differ |
+| `igw_tree_vs_linear.csv/json` | Nine across-order mean, SD, and SEM rows for that separately tuned comparison |
+| `igw_tree_vs_linear_matched_by_order.csv/json` | 1,260 tree-versus-linear differences across nine losses, seven common gamma multipliers, and 20 orders |
+| `igw_tree_vs_linear_matched.csv/json` | 63 across-order matched-gamma summaries by `l01` and multiplier |
 | `selected_routing_accuracy.png` | CBPSide, ETC HGB, ETC Linear, IGW Tree, IGW Linear, and Random routing rate versus cached-strong-reference accuracy with order-SD bars |
 | `selected_cost_vs_l01.png` | The same six curves' selected realized total cost versus ascending `l01` with order-SD bars |
 | `selected_multiplier_vs_l01.png` | Selected multiplier for each of the five learned policies at every loss point |
 | `igw_tree_vs_linear_cost_difference.png` | Separately tuned best-vs-best `linear cost - tree cost`; positive values favor IGW Tree |
-| `igw_tree_vs_linear_matched_cost_difference.png` | Matched-gamma `linear cost - tree cost` for all five common multipliers |
+| `igw_tree_vs_linear_matched_cost_difference.png` | Matched-gamma `linear cost - tree cost` for all seven common multipliers |
 | `summary.json` | Compact five-policy-plus-Random selected results, both IGW comparisons, and oracle-selection warning |
 | `multiplier-sweep-results.zip` | Portable top-level tables, figures, manifest, and summary |
 
