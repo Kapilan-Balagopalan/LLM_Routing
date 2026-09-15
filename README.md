@@ -13,13 +13,13 @@ disagreement. A separate synthetic-label positive control is available for
 implementation sanity checks; it must not be interpreted as real benchmark
 routing performance. A separate resumable multiplier tuner is now available
 for 20-order studies. Completed revision-3 pure-doubling, revision-4
-Fibonacci, and revision-5 capped-doubling gap-500 and gap-100 artifacts remain
-in their original fingerprinted directories, but their numerical results were
-not analyzed during the later schedule code changes. The current planned,
-unrun revision-5 gap-32 study retains ETCLinear beside the fixed 15-leaf HGB ETC and
-the matched IGW Linear versus IGW Tree comparison. Adaptive tuner refits now
+Fibonacci, and revision-5 capped-doubling gap-500, gap-100, and gap-32 artifacts
+remain in their original fingerprinted directories, but their numerical results
+were not analyzed during the later schedule code changes. The current planned,
+unrun revision-5 gap-8 study retains ETCLinear beside the fixed 15-leaf HGB ETC
+and the matched IGW Linear versus IGW Tree comparison. Adaptive tuner refits now
 default to capped exponential doubling: the next global-round boundary is
-`min(2b, b+32)`.
+`min(2b, b+8)`.
 This does not alter the established simulator.
 
 For experiment history and conclusions, read [EXPERIMENTS.md](EXPERIMENTS.md).
@@ -153,8 +153,8 @@ multipliers `0.1, 0.3, 1, 3, 10` on the same 20 shuffled orders:
 The 20 order seeds are paired across policies, losses, and multipliers. Model
 snapshots for CBPSide, IGW Tree, and IGW Linear change immediately before
 capped-doubling global rounds by default. Starting at `b=1`, each next boundary
-is `min(2b, b+32)`, so the schedule doubles early and then limits boundary
-gaps to 32 rounds. Each snapshot uses only feedback through `t-1`, and the
+is `min(2b, b+8)`, so the schedule doubles early and then limits boundary
+gaps to 8 rounds. Each snapshot uses only feedback through `t-1`, and the
 policy is still evaluated on every round. CBPSide freezes
 `theta_hat` and `V^-1` within each epoch, while its context-dependent beta is
 still evaluated for every current `x_t`. IGW Tree refits the default HGB on its
@@ -197,7 +197,7 @@ Because the same 20 orders are used to select and display the winner, this is
 an exploratory, optimistic oracle envelope. A later confirmatory study should
 evaluate preselected multipliers on fresh order seeds.
 
-### Full HGB/ETC-linear capped-doubling gap-32 sweep
+### Full HGB/ETC-linear capped-doubling gap-8 sweep
 
 HGB with 15 maximum leaves remains the default so this sweep is directly
 comparable with the established routing experiments and remains the nonlinear
@@ -207,19 +207,19 @@ Linear, the full design produces 4,500 learned candidate rows
 (`5 * 9 * 5 * 20`) before adding analytic Random. Final selection retains five
 learned policies plus Random. The base gamma and ETC taste count are
 intentionally omitted below so they are derived from the eligible online
-horizon. This 2026-09-11 revision is implemented but has not been run as a full
+horizon. This 2026-09-13 revision is implemented but has not been run as a full
 experiment.
 
 ```powershell
 .\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap32-results `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap8-results `
   --context-profile all-features `
   --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
   --multipliers 0.1 0.3 1 3 10 `
   --online-order-repeats 20 `
   --adaptive-update-schedule capped-doubling `
-  --adaptive-max-round-gap 32 `
+  --adaptive-max-round-gap 8 `
   --cbpside-base-beta-scale 0.5 `
   --cbpside-max-confidence-radius 0.5 `
   --igw-mu 2 `
@@ -233,23 +233,23 @@ experiment.
 Relative to the earlier four-policy design, ETC Linear adds 900 candidate rows
 (`9 * 5 * 20`). It uses at most one unit-weight prefix fit per order/multiplier
 and then reuses frozen probabilities across losses. At `n=12,648`, capped
-doubling with a 32-round gap has 400 boundaries and permits at most 399
-adaptive refits after feedback exists. Its last boundary is round 12,640. The
-repeated full-history row-work upper bound is 2,502,351, which is `87.39x` the
-Fibonacci upper bound, `152.87x` pure
-doubling, `15.33x` the completed gap-500 configuration, and `3.11x` the
-completed gap-100 configuration. In exchange, its final potentially stale tail
-is only 9 rounds, versus 21 for gap 100, 137 for gap 500, 1,703 for Fibonacci,
-and 4,457 for pure doubling. This is an extremely large runtime increase;
+doubling with an 8-round gap has 1,584 boundaries and permits at most 1,583
+adaptive refits after feedback exists. Its last boundary is round 12,648. The
+repeated full-history row-work upper bound is 10,002,991, which is `349.33x`
+the Fibonacci upper bound, `611.09x` pure doubling, `61.26x` the completed
+gap-500 configuration, `12.45x` gap 100, and `4.00x` gap 32. In exchange, its
+final potentially stale tail is only one round, versus 9 for gap 32, 21 for gap
+100, 137 for gap 500, 1,703 for Fibonacci, and 4,457 for pure doubling. This is
+an extremely large runtime increase;
 the actual number of fits can be lower when no new tastes arrive or both
 classes are not yet available. Use the fresh capped-doubling output directory
 shown above; older outputs have a different configuration fingerprint and
-cannot be mixed with this run. The completed gap-500 and gap-100 directories
-remain valid revision-5 results: use each original directory and explicitly
-pass its corresponding `--adaptive-max-round-gap 500` or
-`--adaptive-max-round-gap 100` to resume or rebuild its plots. Once the gap-32
-run is started, rerun the identical gap-32 command to resume its completed
-candidate checkpoints.
+cannot be mixed with this run. The completed gap-500, gap-100, and gap-32
+directories remain valid revision-5 results: use each original directory and
+explicitly pass its corresponding `--adaptive-max-round-gap 500`,
+`--adaptive-max-round-gap 100`, or `--adaptive-max-round-gap 32` to resume or
+rebuild its plots. Once the gap-8 run is started, rerun the identical gap-8
+command to resume its completed candidate checkpoints.
 
 Each completed policy/`l01`/multiplier/order candidate is saved atomically.
 If the run is interrupted, repeat the exact command above with the same output
@@ -264,14 +264,14 @@ check, not a research result, and implementation work does not run it:
 ```powershell
 .\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap32-pilot `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap8-pilot `
   --context-profile all-features `
   --limit 500 `
   --l01-values 1.8 2.6 3.3 `
   --multipliers 0.3 1 3 `
   --online-order-repeats 2 `
   --adaptive-update-schedule capped-doubling `
-  --adaptive-max-round-gap 32 `
+  --adaptive-max-round-gap 8 `
   --tree-estimator hgb `
   --hgb-max-leaf-nodes 15 `
   --jobs 1 `
@@ -285,13 +285,13 @@ any policy again:
 ```powershell
 .\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap32-results `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap8-results `
   --context-profile all-features `
   --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
   --multipliers 0.1 0.3 1 3 10 `
   --online-order-repeats 20 `
   --adaptive-update-schedule capped-doubling `
-  --adaptive-max-round-gap 32 `
+  --adaptive-max-round-gap 8 `
   --cbpside-base-beta-scale 0.5 `
   --cbpside-max-confidence-radius 0.5 `
   --igw-mu 2 `
@@ -317,14 +317,14 @@ First measure correctness and runtime on this non-scientific pilot:
 ```powershell
 .\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-river-igw-etc-linear-capped-doubling-gap32-pilot `
+  --output-dir .\boolq-138d-multiplier-sweep-river-igw-etc-linear-capped-doubling-gap8-pilot `
   --context-profile all-features `
   --limit 500 `
   --l01-values 1.8 2.6 3.3 `
   --multipliers 0.3 1 3 `
   --online-order-repeats 2 `
   --adaptive-update-schedule capped-doubling `
-  --adaptive-max-round-gap 32 `
+  --adaptive-max-round-gap 8 `
   --tree-estimator river-hoeffding `
   --river-max-depth 4 `
   --river-grace-period 200 `
@@ -339,13 +339,13 @@ new output directory:
 ```powershell
 .\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
   --cache .\boolq-routing-cache-full.zip `
-  --output-dir .\boolq-138d-multiplier-sweep-river-igw-etc-linear-capped-doubling-gap32-results `
+  --output-dir .\boolq-138d-multiplier-sweep-river-igw-etc-linear-capped-doubling-gap8-results `
   --context-profile all-features `
   --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
   --multipliers 0.1 0.3 1 3 10 `
   --online-order-repeats 20 `
   --adaptive-update-schedule capped-doubling `
-  --adaptive-max-round-gap 32 `
+  --adaptive-max-round-gap 8 `
   --cbpside-base-beta-scale 0.5 `
   --cbpside-max-confidence-radius 0.5 `
   --igw-mu 2 `

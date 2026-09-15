@@ -101,44 +101,42 @@ def test_adaptive_epochs_update_before_boundaries_without_gaps(
     assert all(boundary - 1 == start for boundary, start, _ in epochs)
 
 
-def test_capped_doubling_limits_late_boundary_gaps_to_32_rounds():
+def test_capped_doubling_limits_late_boundary_gaps_to_8_rounds():
     expected_boundaries = [
         1,
         2,
         4,
         8,
         16,
+        24,
         32,
-        64,
-        96,
-        128,
-        160,
-        192,
+        40,
+        48,
+        56,
     ]
     expected_epochs = [
         (1, 0, 1),
         (2, 1, 3),
         (4, 3, 7),
         (8, 7, 15),
-        (16, 15, 31),
-        (32, 31, 63),
-        (64, 63, 95),
-        (96, 95, 127),
-        (128, 127, 159),
-        (160, 159, 191),
-        (192, 191, 200),
+        (16, 15, 23),
+        (24, 23, 31),
+        (32, 31, 39),
+        (40, 39, 47),
+        (48, 47, 55),
+        (56, 55, 60),
     ]
 
-    assert list(tuning._schedule_boundaries(200, "capped-doubling")) == (
+    assert list(tuning._schedule_boundaries(60, "capped-doubling")) == (
         expected_boundaries
     )
-    assert list(tuning._adaptive_epochs(200, "capped-doubling")) == (
+    assert list(tuning._adaptive_epochs(60, "capped-doubling")) == (
         expected_epochs
     )
     assert max(
         later - earlier
         for earlier, later in zip(expected_boundaries, expected_boundaries[1:])
-    ) == 32
+    ) == 8
 
 
 def test_capped_doubling_honors_a_custom_maximum_round_gap():
@@ -181,9 +179,9 @@ def test_doubling_epochs_remains_a_backward_compatible_explicit_schedule():
     [
         (
             "capped-doubling",
-            32,
+            8,
             [1, 3, 7],
-            "capped_doubling_gap_32",
+            "capped_doubling_gap_8",
         ),
         ("capped-doubling", 3, [1, 3, 6], "capped_doubling_gap_3"),
         ("fibonacci", 500, [1, 2, 4, 7], "fibonacci"),
@@ -246,7 +244,7 @@ def test_cbpside_uses_feedback_only_at_next_scheduled_boundary(
         "expected_slug",
     ),
     [
-        ("capped-doubling", 32, [7], 7, "capped_doubling_gap_32"),
+        ("capped-doubling", 8, [7], 7, "capped_doubling_gap_8"),
         ("capped-doubling", 3, [6], 6, "capped_doubling_gap_3"),
         ("fibonacci", 500, [4, 3], 7, "fibonacci"),
         ("doubling", 500, [7], 7, "doubling"),
@@ -718,7 +716,7 @@ def test_parser_keeps_established_hgb_as_explicit_default():
     assert args.tree_estimator == "hgb"
     assert args.hgb_max_leaf_nodes == 15
     assert args.adaptive_update_schedule == "capped-doubling"
-    assert args.adaptive_max_round_gap == 32
+    assert args.adaptive_max_round_gap == 8
     assert fibonacci_args.adaptive_update_schedule == "fibonacci"
     assert doubling_args.adaptive_update_schedule == "doubling"
     assert tuning._tree_settings(doubling_args)["kind"] == "river-hoeffding"
@@ -793,10 +791,10 @@ def test_manifest_fingerprint_covers_contexts_and_cbpside_regularization(tmp_pat
     assert manifest["tuned_policies"] == list(tuning.TUNED_POLICIES)
     assert manifest["update_schedule"] == {
         "name": "capped-doubling",
-        "maximum_round_gap": 32,
+        "maximum_round_gap": 8,
         "boundary_rule": (
             "before global rounds starting at 1, with "
-            "next=min(2*current, current+32)"
+            "next=min(2*current, current+8)"
         ),
         "boundary_rounds": [1, 2, 4, 8],
         "boundary_count": 4,
@@ -974,7 +972,7 @@ def test_small_end_to_end_sweep_resumes_and_plot_only_uses_checkpoints(
         (output / "sweep_manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["update_schedule"]["name"] == "capped-doubling"
-    assert manifest["update_schedule"]["maximum_round_gap"] == 32
+    assert manifest["update_schedule"]["maximum_round_gap"] == 8
     assert manifest["update_schedule"]["boundary_rounds"] == [1, 2, 4, 8]
     assert manifest["tuned_policies"] == list(tuning.TUNED_POLICIES)
     candidate_rows = json.loads(
@@ -999,7 +997,7 @@ def test_small_end_to_end_sweep_resumes_and_plot_only_uses_checkpoints(
         rows = [row for row in candidate_rows if row["policy"] == policy]
         assert all(
             row["update_schedule"]
-            == "global_round_capped_doubling_gap_32_before_action"
+            == "global_round_capped_doubling_gap_8_before_action"
             for row in rows
         )
     selected = json.loads(

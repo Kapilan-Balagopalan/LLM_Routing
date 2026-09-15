@@ -205,8 +205,8 @@ orders.
 
 Adaptive snapshots for CBPSide, IGW Tree, and IGW Linear change only immediately
 before capped-doubling global-round boundaries by default. Starting at `b=1`,
-the next boundary is `min(2b, b+32)`: the schedule doubles early and then uses
-a maximum boundary gap of 32 rounds. Each snapshot uses revealed feedback
+the next boundary is `min(2b, b+8)`: the schedule doubles early and then uses
+a maximum boundary gap of 8 rounds. Each snapshot uses revealed feedback
 through `t-1`, and every policy is still evaluated on every round. CBPSide
 freezes both `theta_hat` and `V^-1` within an epoch but evaluates
 `min((0.5 * multiplier) * sqrt(x_t^T V^-1 x_t), 0.5)` on every current context.
@@ -253,20 +253,20 @@ same 20 orders, so these figures are an optimistic exploratory oracle envelope,
 not an unbiased evaluation of a preselected policy.
 
 Relative to the earlier four-policy design, ETC Linear adds 900 candidate rows.
-At `n=12,648`, capped doubling with a 32-round maximum gap has 400 boundaries
-and permits at most 399 adaptive refits after feedback exists. Its last boundary
-is round 12,640. The full-history row-work upper bound is 2,502,351, `87.39x`
-Fibonacci, `152.87x` pure doubling,
-`15.33x` the completed gap-500 configuration, and `3.11x` the completed gap-100
-configuration, while its final potentially stale tail is 9 rounds instead of
-21, 137, 1,703, or 4,457. This is an extremely large runtime increase.
+At `n=12,648`, capped doubling with an 8-round maximum gap has 1,584 boundaries
+and permits at most 1,583 adaptive refits after feedback exists. Its last
+boundary is round 12,648. The full-history row-work upper bound is 10,002,991,
+`349.33x` Fibonacci, `611.09x` pure doubling, `61.26x` the completed gap-500
+configuration, `12.45x` gap 100, and `4.00x` gap 32, while its final potentially
+stale tail is one round instead of 9, 21, 137, 1,703, or 4,457. This is an
+extremely large runtime increase.
 Candidate-level checkpoints make an identical-command resume safe; this
 configuration must use a fresh output directory. Finalization writes five
 figures, including both the separately tuned and matched-gamma IGW
-cost-difference plots. The gap-500 and gap-100 revision-5 sweeps each completed
-all 4,500 candidate rows; their numerical results were not analyzed during the
-gap-32 code change. The gap-32 configuration is planned and implemented but has
-not been run as a full experiment.
+cost-difference plots. The gap-500, gap-100, and gap-32 revision-5 sweeps each
+completed all 4,500 candidate rows; their numerical results were not analyzed
+during the gap-8 code change. The gap-8 configuration is planned and
+implemented but has not been run as a full experiment.
 
 ### `prompt_embeddings.py`
 
@@ -311,12 +311,12 @@ or environment interfaces.
   paired orders and candidate-level resume. Revision-3 pure-doubling and
   revision-4 Fibonacci artifacts were completed, although their numerical
   results were not analyzed during the revision-5 code change. Its completed
-  revision-5 gap-500 and gap-100 artifacts are retained, while the current
-  planned, unrun revision-5 study uses default capped-doubling global-round
-  epochs with a 32-round maximum gap for CBPSide and both IGW variants, keeps
-  explicit Fibonacci and pure-doubling boundary choices for new revision-5
-  comparisons, retains independently tuned ETC Linear beside fixed 15-leaf
-  ETC HGB, and keeps the
+  revision-5 gap-500, gap-100, and gap-32 artifacts are retained, while the
+  current planned, unrun revision-5 study uses default capped-doubling
+  global-round epochs with an 8-round maximum gap for CBPSide and both IGW
+  variants, keeps explicit Fibonacci and pure-doubling boundary choices for
+  new revision-5 comparisons, retains independently tuned ETC Linear beside
+  fixed 15-leaf ETC HGB, and keeps the
   matched IGW Tree/IGW Linear comparison. The optional weighted River
   Hoeffding sensitivity changes IGW Tree only. It exports both separately tuned
   best-vs-best and fixed-multiplier matched-gamma IGW comparisons;

@@ -1130,8 +1130,8 @@ Completed primary command:
 
 The gap-100 output directory is protected by a configuration fingerprint.
 Current revision-5 code can resume it or use `--plot-only` only when every
-scientific option above and this exact directory are reused. Do not point the
-new gap-32 run at either completed capped-doubling directory.
+scientific option above and this exact directory are reused. Do not point a
+different gap configuration at either completed capped-doubling directory.
 
 The read-only completion check found exactly 4,500 candidate checkpoints plus
 the finalized reusable tables, five figures, summary, and ZIP bundle in
@@ -1139,15 +1139,17 @@ the finalized reusable tables, five figures, summary, and ZIP bundle in
 No numerical metrics or selected multipliers were inspected while changing the
 default from gap 100 to gap 32.
 
-### BoolQ 138D capped-doubling gap-32 tuning revision, 2026-09-11
+### BoolQ 138D capped-doubling gap-32 tuning result, 2026-09-11
 
 Branch: `experiment/boolq-cbpside-beta1`
 
-Status: implemented as the next planned configuration, but no full gap-32
-experiment has been run and no numerical result is recorded. This revision
-supersedes gap 100 only as the default for the next run. The completed gap-500
-and gap-100 artifacts remain preserved and usable with their exact revision-5
-options and original directories.
+Historical status: the revision-5 gap-32 study completed all 4,500 candidate
+checkpoints and finalized its tables, figures, summary, and ZIP bundle. A
+read-only artifact inspection verified completion; no numerical-result analysis
+was performed during the subsequent gap-8 code-change turn. This entry
+superseded the completed gap-100 configuration above for that run. All three
+completed capped-doubling configurations and their fingerprinted artifacts
+remain preserved.
 
 This revision changes only the capped-doubling maximum boundary gap from 100 to
 32 global rounds. All other inputs remain unchanged: 12,648 eligible BoolQ
@@ -1159,7 +1161,7 @@ five multipliers, 20 paired shuffled orders, policy seed 0, CBPSide base scale
 pointwise independent selection, and Random matched only to selected ETC HGB
 traffic.
 
-Starting with boundary `b=1`, the default schedule now sets
+Starting with boundary `b=1`, this completed schedule used
 
 ```text
 next boundary = min(2*b, b + 32)
@@ -1185,15 +1187,17 @@ shorter stale-tail bound therefore comes with an extremely large runtime
 increase across the complete sweep. Actual model fits can be fewer when no new
 taste has arrived or the estimator is not yet feasible.
 
-Fibonacci, pure doubling, and both completed capped-doubling configurations
-remain available under revision 5. For a completed capped run, explicitly use
+Fibonacci, pure doubling, and the earlier completed capped-doubling
+configurations remain available under revision 5. For a completed capped run,
+explicitly use
 its original output directory with `--adaptive-update-schedule
-capped-doubling` and the corresponding `--adaptive-max-round-gap 500` or
-`--adaptive-max-round-gap 100`. The five-policy design remains 4,500 learned
-candidate rows; changing the adaptive gap does not alter ETC fitting,
-selection, outputs, or the analytic Random construction.
+capped-doubling` and the corresponding `--adaptive-max-round-gap 500`,
+`--adaptive-max-round-gap 100`, or `--adaptive-max-round-gap 32`. The
+five-policy design remains 4,500 learned candidate rows; changing the adaptive
+gap does not alter ETC fitting, selection, outputs, or the analytic Random
+construction.
 
-Planned primary command; implementation and documentation work did not run it:
+Completed primary command:
 
 ```powershell
 .\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
@@ -1215,13 +1219,101 @@ Planned primary command; implementation and documentation work did not run it:
   --policy-seed 0
 ```
 
-The fresh gap-32 output directory is required because the maximum gap is part
+The gap-32 output directory is protected by a configuration fingerprint.
+Current revision-5 code can resume it or use `--plot-only` only when every
+scientific option above and this exact directory are reused. Do not point the
+new gap-8 run at any completed capped-doubling directory.
+
+The read-only completion check found exactly 4,500 candidate checkpoints plus
+the finalized reusable tables, five figures, summary, and ZIP bundle in
+`boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap32-results`.
+No numerical metrics or selected multipliers were inspected while changing the
+default from gap 32 to gap 8.
+
+### BoolQ 138D capped-doubling gap-8 tuning revision, 2026-09-13
+
+Branch: `experiment/boolq-cbpside-beta1`
+
+Status: implemented as the next planned configuration, but no full gap-8
+experiment has been run and no numerical result is recorded. This revision
+supersedes gap 32 only as the default for the next run. The completed gap-500,
+gap-100, and gap-32 artifacts remain preserved and usable with their exact
+revision-5 options and original directories.
+
+This revision changes only the capped-doubling maximum boundary gap from 32 to
+8 global rounds. All other inputs remain unchanged: 12,648 eligible BoolQ rows,
+all 138 manifest-defined features, cached weak/strong disagreement, cached
+strong answers as the routing reference, nine ascending `l01` values, five
+multipliers, 20 paired shuffled orders, policy seed 0, CBPSide base scale 0.5
+and cap 0.5, IGW base `gamma=sqrt(n)` and `mu=2`, ETC base `n^(2/3)`, 15-leaf
+HGB, ETCLinear, IGW Linear, capped IGW inverse-propensity weights, pointwise
+independent selection, and Random matched only to selected ETC HGB traffic.
+
+Starting with boundary `b=1`, the default schedule now sets
+
+```text
+next boundary = min(2*b, b + 8)
+```
+
+For this horizon the boundaries begin
+`1,2,4,8,16,24,32,40,48,56,64,...` and end at 12,648. Immediately before
+boundary `b`, an adaptive estimator may use only feedback revealed through
+round `b-1`; CBPSide and both IGW policies still make a policy decision every
+round, and CBPSide still evaluates its context-dependent beta for every current
+context. ETC HGB and ETCLinear remain unchanged: each uses its forced prefix,
+fits once when feasible, freezes, and reuses probabilities across all loss
+values.
+
+For `n=12,648`, gap 8 produces exactly 1,584 boundaries including round 1 and
+therefore at most 1,583 adaptive fits after feedback exists. The last boundary
+is 12,648, leaving a final potentially stale tail of one round when counted
+inclusively. The repeated full-history row-work upper bound for one adaptive
+trajectory is `sum_b (b-1) = 10,002,991` rows. This is `349.33x` the Fibonacci
+upper bound of 28,635, `611.09x` pure doubling's 16,369, `61.26x` the gap-500
+upper bound of 163,277, `12.45x` the gap-100 upper bound of 803,622, and `4.00x`
+the gap-32 upper bound of 2,502,351. The shortest possible stale-tail bound
+therefore comes with an extremely large runtime increase across the complete
+sweep. Actual model fits can be fewer when no new taste has arrived or the
+estimator is not yet feasible.
+
+Fibonacci, pure doubling, and all three completed capped-doubling
+configurations remain available under revision 5. For a completed capped run,
+explicitly use its original output directory with
+`--adaptive-update-schedule capped-doubling` and the corresponding
+`--adaptive-max-round-gap 500`, `--adaptive-max-round-gap 100`, or
+`--adaptive-max-round-gap 32`. The five-policy design remains 4,500 learned
+candidate rows; changing the adaptive gap does not alter ETC fitting,
+selection, outputs, or the analytic Random construction.
+
+Planned primary command; implementation and documentation work did not run it:
+
+```powershell
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap8-results `
+  --context-profile all-features `
+  --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
+  --multipliers 0.1 0.3 1 3 10 `
+  --online-order-repeats 20 `
+  --adaptive-update-schedule capped-doubling `
+  --adaptive-max-round-gap 8 `
+  --cbpside-base-beta-scale 0.5 `
+  --cbpside-max-confidence-radius 0.5 `
+  --igw-mu 2 `
+  --tree-estimator hgb `
+  --hgb-max-leaf-nodes 15 `
+  --jobs 4 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+The fresh gap-8 output directory is required because the maximum gap is part
 of the configuration fingerprint. Resume and `--plot-only` must reuse every
-scientific option and this exact directory. Do not point the gap-32 run at the
-completed gap-500 or gap-100 directories.
+scientific option and this exact directory. Do not point the gap-8 run at any
+completed capped-doubling directory.
 
 No full sweep, pilot, or numerical-result inspection was performed for the
-gap-32 change.
+gap-8 change.
 
 ### Prompt-only 20D real-label fine-grid study, 2026-09-03
 

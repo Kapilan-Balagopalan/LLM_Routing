@@ -29,14 +29,15 @@
   their numerical results were not analyzed during the revision-5 code change,
   and current revision-5 code cannot resume or plot-only those directories.
   Use the corresponding original code revision for those archived artifacts.
-  Completed revision-5 capped-doubling gap-500 and gap-100 artifacts are also
-  retained; each directory contains all 4,500 candidate checkpoints and its
-  finalized tables, figures, summary, and ZIP bundle. Their numerical results
-  were not analyzed during the subsequent schedule code changes. Current
-  revision-5 code can resume or plot-only either result only with its original
-  output directory and the corresponding explicit
-  `--adaptive-max-round-gap 500` or `--adaptive-max-round-gap 100`. The current
-  planned, unrun gap-32 configuration has five tuned policies:
+  Completed revision-5 capped-doubling gap-500, gap-100, and gap-32 artifacts
+  are also retained; each directory contains all 4,500 candidate checkpoints
+  and its finalized tables, figures, summary, and ZIP bundle. Their numerical
+  results were not analyzed during the subsequent schedule code changes.
+  Current revision-5 code can resume or plot-only a completed result only with
+  its original output directory and the corresponding explicit
+  `--adaptive-max-round-gap 500`, `--adaptive-max-round-gap 100`, or
+  `--adaptive-max-round-gap 32`. The current planned, unrun gap-8 configuration
+  has five tuned policies:
   CBPSide, fixed 15-leaf HGB ETC, ETCLinear, IGW Tree, and IGW Linear. The two
   ETC variants share each shuffled order, forced prefix, taste budget, and unit
   training weights; each feasible prefix fits once, freezes, reuses
@@ -45,7 +46,7 @@
   Laplace-smoothed prevalence fallback without fitting. Random is matched only
   to selected HGB ETC traffic. CBPSide and both IGW variants now default to
   capped-doubling global-round boundaries: start at 1 and set the next boundary
-  to `min(2b, b+32)`. Fit before boundary `b` using feedback through `b-1`,
+  to `min(2b, b+8)`. Fit before boundary `b` using feedback through `b-1`,
   while evaluating the policy every round. The ETC variants are unaffected by
   this schedule. Use `--adaptive-update-schedule fibonacci` or
   `--adaptive-update-schedule doubling` to select those boundary rules for a
@@ -54,13 +55,13 @@
   matched-gamma IGW comparisons; actions and realized feedback may diverge.
   HGB remains the nonlinear primary and `river-hoeffding` changes IGW Tree
   only. The design has 4,500 candidate rows and selects five learned policies
-  plus Random. At `n=12,648`, capped doubling with gap 32 has 400 boundaries
-  and at most 399 adaptive refits. Its 2,502,351 full-history row-work upper
-  bound is `87.39x` Fibonacci, `152.87x` pure doubling, `15.33x` the completed
-  gap-500 configuration, and `3.11x` the completed gap-100 configuration,
-  while its final potentially stale tail is 9 rounds. This is an extremely
-  large runtime increase. Use the fresh
-  `boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap32-results`
+  plus Random. At `n=12,648`, capped doubling with gap 8 has 1,584 boundaries
+  and at most 1,583 adaptive refits. Its last boundary is 12,648, so its final
+  potentially stale tail is one round. Its 10,002,991 full-history row-work
+  upper bound is `349.33x` Fibonacci, `611.09x` pure doubling, `61.26x` the
+  completed gap-500 configuration, `12.45x` gap 100, and `4.00x` gap 32. This
+  is an extremely large runtime increase. Use the fresh
+  `boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap8-results`
   directory.
 - `backup/current-combined`: recovery snapshot made before branch separation.
 
