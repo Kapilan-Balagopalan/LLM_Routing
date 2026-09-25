@@ -32,13 +32,16 @@ the established single-configuration simulator remains stable:
 boolq-routing-cache-full.zip
     -> tuning.py selects all manifest-defined context blocks and cached disagreement
     -> tuning.py creates 20 paired shuffled orders
-    -> tuning.py evaluates CBPSide, ETC HGB, ETC Linear, IGW Tree, and IGW Linear candidates
-    -> optional pgts.py supplies one fixed Algorithm-1 PG-TS candidate per loss/order
+    -> tuning.py creates one fixed five-fold cross-fitted HGB-15 reference mapping before policy replay
+    -> tuning.py evaluates CBPSide, SquareCB.PMSide + HGB, SquareCB.PMSide + linear logistic, and PG-TS multiplier candidates
+    -> pgts.py supplies boundary-scheduled Bayesian-logistic draws for each prior-scale candidate
     -> online_tree.py supplies batch HGB, batch logistic, or incremental Hoeffding estimators
     -> tuning.py checkpoints every completed policy/l01/multiplier/order candidate
     -> tuning.py selects the lowest-mean-cost multiplier at each policy/l01 point
-    -> tuning.py adds analytic Random matched only to the selected ETC HGB traffic
-    -> tuning.py writes reusable tables, figures, and a ZIP bundle
+    -> tuning.py adds analytic Random matched to the selected SquareCB.PMSide + HGB traffic
+    -> tuning.py reconstructs cost and fixed-reference regret curves without exposing the reference to players
+    -> plot_style.py applies the shared publication contract and emits PDF/400-DPI-PNG pairs
+    -> tuning.py writes reusable tables, compact NPZ curves, figures, and a ZIP bundle
 ```
 
 At round `t`, a player receives only the current context. It selects:
@@ -170,148 +173,229 @@ train-validation task on the canonical sample collection.
 ### `online_tree.py`
 
 Defines the probability-estimator boundary used only by the multiplier tuner.
-The ETC HGB backend is always the established scikit-learn 15-leaf HGB and uses
-unit-weight prefix data. The `--tree-estimator` option controls IGW Tree only:
-its default HGB refits from complete revealed history, while optional
+The current revision-9 tuner has no ETC policy. The `--tree-estimator` option controls
+SquareCB.PMSide + HGB only: its default 15-leaf HGB refits from complete
+revealed history, while optional
 `river-hoeffding` uses a River 0.21.2 `HoeffdingTreeClassifier` with maximum
-depth 4, grace period 200, and weighted `learn_one` updates that preserve IGW
-inverse-propensity weights. The shared logistic backend fits a weighted
+depth 4, grace period 200, and weighted `learn_one` updates that preserve
+SquareCB.PMSide inverse-propensity weights. The shared logistic backend fits a
 `StandardScaler` followed by L2 logistic regression using every feature.
-ETC Linear supplies unit weights from the forced prefix; IGW Linear supplies
-inverse-propensity weights from its own revealed history. Neither linear policy
-is affected by the tree-backend option. Aggregated Mondrian forests were not
-added because River's implementation does not accept the per-example weights
-required by the IGW estimator.
+SquareCB.PMSide + linear logistic supplies inverse-propensity weights from its
+own revealed history and is unaffected by the tree-backend option. Aggregated
+Mondrian forests were
+not added because River's implementation does not accept the per-example
+weights required by the SquareCB.PMSide estimator.
 
 ### `pgts.py`
 
-Implements the opt-in Pólya-Gamma Thompson sampler from Algorithm 1 of *Apple
+Implements the Pólya-Gamma Gibbs kernel underlying Algorithm 1 of *Apple
 Tasting Revisited*. The prior is `N(0, prior_std^2 I)` and the default is
-`prior_std=1`. Each call performs exactly `M=15` complete Pólya-Gamma/Gaussian
-Gibbs transitions, warm-started from the preceding round's final draw, and
-returns only the final parameter sample. A proper prior keeps the conditional
-precision positive definite; the Gaussian draw is computed from its Cholesky
-factor without explicitly forming a covariance inverse.
+`prior_std=1`. Each posterior-update call performs exactly `M=15` complete
+Pólya-Gamma/Gaussian Gibbs transitions, warm-started from the preceding final
+draw, and returns only the final parameter sample. A proper prior keeps the
+conditional precision positive definite; the Gaussian draw is computed from
+its Cholesky factor without explicitly forming a covariance inverse.
 
 The module imports `polyagamma` lazily and accepts an injected sampler for
 offline tests. It sees only the feature rows and binary disagreement outcomes
 that earlier action-1 rounds revealed. It does not own the full outcome stream,
 perform inverse-propensity weighting, or apply the tuner's adaptive snapshot
-schedule.
+schedule. The tuner exposes `M` through `--pgts-gibbs-steps`, the base prior
+scale through `--pgts-base-prior-std`, and uses `--policy-seed` for both
+Gaussian and Pólya-Gamma draws. Revision 9 tunes PG-TS pointwise by calling the
+kernel with `prior_std = --pgts-base-prior-std * multiplier` for every common
+multiplier, loss, and paired online order. Candidate rows identify the tuned
+quantity as `parameter_name=prior_std` and retain its base, multiplier, and
+effective value; `pgts_prior_std` repeats that effective value. The kernel is
+still called only at eligible pure-doubling boundaries
+when new action-1 feedback has arrived; the revision-6 historical design called
+it every round.
+The legacy `--pgts-prior-std` spelling remains an alias for the canonical
+revision-9 base-scale option.
+
+### `plot_style.py`
+
+Defines the publication contract shared by every figure from `tuning.py`:
+method and axis labels, Matplotlib defaults, legend/font sizes, regular and
+short figure sizes, 400-DPI PNG export, matching vector-PDF export, and the
+pointwise two-sided Student-`t` half-width helper. It is presentation-only and
+does not alter a policy, selection, checkpoint, or scientific fingerprint.
 
 ### `tuning.py`
 
 The `tune-llm-routing` entry point owns the exploratory pointwise multiplier
 sweep. Its module form is `python -m llm_routing_simulation.tuning`. It uses all
 138 manifest-defined BoolQ features, the ascending `l01` grid, 20 paired order
-seeds, and multipliers `0.03, 0.1, 0.3, 1, 3, 10, 30`. The three base rules are
-CBPSide beta scale 0.5 with a separately fixed cap of 0.5, IGW
-`gamma=sqrt(n)`, and the shared ETC HGB/ETC Linear budget `n^(2/3)` tastes with
-`ceil(multiplier * base)` applied afterward.
+seeds, and multipliers `0.1, 0.3, 1, 3, 10`. Revision 9 tunes four policies:
+CBPSide with base beta scale 0.5 and a separately fixed cap of 0.5,
+SquareCB.PMSide + HGB with base `gamma=sqrt(n)`, and SquareCB.PMSide + linear
+logistic with the same gamma rule, plus scheduled PG-TS with effective prior
+standard deviation `--pgts-base-prior-std * multiplier`. ETC HGB and ETC
+Linear are disabled rather than silently retained as untuned baselines.
 
-The tuner exposes two IGW curves for a controlled estimator comparison. IGW
-Tree uses the nonlinear HGB primary by default; IGW Linear uses regularized
-linear logistic regression. They share the complete 138D context, paired order,
-gamma candidate, `mu`, policy random numbers, cold-start rule, capped-doubling
-schedule, and capped inverse-propensity-weighting rule. At matched gamma, only
-the configured probability estimator differs. Their realized actions can
-diverge, however, so they need not reveal the same feedback rows or realize the
-same propensities and IPS weights. The complete design contains 6,300 learned
-candidate rows: five policies times nine losses times seven multipliers times
-20 orders.
+The tuner exposes two SquareCB.PMSide curves for a controlled estimator
+comparison. SquareCB.PMSide + HGB uses the nonlinear HGB primary by default;
+SquareCB.PMSide + linear logistic uses regularized linear logistic regression.
+They share the complete 138D context, paired
+order, gamma candidate, `mu`, policy random numbers, cold-start rule,
+pure-doubling schedule, and capped inverse-propensity-weighting rule. At
+matched gamma, only the configured probability estimator differs. Their
+realized actions can diverge, however, so they need not reveal the same rows or
+realize the same propensities and weights.
 
-With `--include-pgts`, the tuner additionally runs one fixed PG-TS trajectory
-for each `l01` and shuffled order. It supplies the same row-normalized context
-plus intercept used by CBPSide, draws a new final Gibbs state before every
-online action, and appends a label only after action 1. PG-TS has no generic
-exploration multiplier, so it is excluded from pointwise multiplier selection
-and the multiplier figure but included directly in the reusable candidate and
-selected-result tables and in the routing/cost plots. The legacy no-PG-TS path
-retains the revision-5 manifest fingerprint; enabling PG-TS creates a
-revision-6 fingerprint and therefore requires a fresh output directory.
+The canonical command-line controls are `--squarecb-pmside-base-gamma`,
+`--squarecb-pmside-mu`, and `--squarecb-pmside-min-propensity`. Omitting the
+base-gamma option derives `sqrt(n)` after eligibility filtering and any limit.
 
-For the nine losses, 20 orders, and seven multipliers, PG-TS adds 180 fixed
-checkpoints to the existing 6,300 tuned checkpoints. The enabled design has
-6,480 candidate rows, 324 candidate aggregates, the same 45 multiplier
-selections, 1,260 selected order rows after adding Random, 63 selected
-summaries, and 212 progress groups. This exact every-round Gibbs path is
-computationally much heavier than the gap-32 estimators and must first be
-benchmarked on a small horizon.
+Adaptive snapshots for the three non-Bayesian tuned policies change immediately
+before global rounds `1,2,4,8,...`. Each snapshot uses feedback through `t-1`, and
+every policy is still evaluated on every round. CBPSide freezes `theta_hat`
+and `V^-1` within an epoch but evaluates
+`min((0.5 * multiplier) * sqrt(x_t^T V^-1 x_t), 0.5)` for every current
+context. SquareCB.PMSide + HGB refits HGB on its revealed history, or applies
+buffered weighted River updates, at the same boundaries. SquareCB.PMSide +
+linear logistic refits its weighted logistic estimator on its own revealed
+history. Fibonacci and capped doubling
+remain explicit reproduction/sensitivity choices; `--adaptive-max-round-gap`
+has an effect only when capped doubling is selected.
 
-Adaptive snapshots for CBPSide, IGW Tree, and IGW Linear change only immediately
-before capped-doubling global-round boundaries by default. Starting at `b=1`,
-the next boundary is `min(2b, b+32)`: the schedule doubles early and then uses
-a maximum boundary gap of 32 rounds. Each snapshot uses revealed feedback
-through `t-1`, and every policy is still evaluated on every round. CBPSide
-freezes both `theta_hat` and `V^-1` within an epoch but evaluates
-`min((0.5 * multiplier) * sqrt(x_t^T V^-1 x_t), 0.5)` on every current context.
-IGW Tree either refits HGB on the complete revealed history or applies buffered
-weighted River updates at the same boundaries. IGW Linear refits its weighted
-logistic estimator on its own revealed history at those boundaries. Passing
-`--adaptive-update-schedule fibonacci` selects Fibonacci boundaries for a new
-revision-5 run, and `--adaptive-update-schedule doubling` selects the original
-`t=1,2,4,8,...` boundary rule for a new revision-5 run.
-`--adaptive-max-round-gap` controls only capped doubling. Neither ETC variant
-uses the adaptive schedule. Completed revision-3 doubling and revision-4
-Fibonacci artifacts retain older configuration fingerprints; current
-revision-5 code cannot resume or plot-only those directories, which require
-their original code revision.
+With `--include-pgts`, the tuner adds PG-TS as a fourth tuned policy. For each
+`l01`, common multiplier, and paired order, its Gaussian prior standard
+deviation is the base `--pgts-base-prior-std` times that multiplier. It supplies
+row-normalized context plus an intercept and performs its first `M`-transition
+Gibbs draw from the candidate prior at round 1. At each later estimator
+boundary, it performs the configured number of complete Gibbs transitions using
+action-1 feedback through the preceding round only if new feedback has arrived
+since the previous PG-TS draw. It otherwise retains its current parameter. The
+final draw is frozen and reused throughout the epoch. PG-TS participates in
+pointwise lowest-mean-cost selection and the multiplier plot. Its default
+`M=15` and base prior standard deviation 1 are exposed, and `--policy-seed`
+controls its random stream. Its public method label remains
+`PG-TS (Bayesian logistic)`. This is a scheduled approximation for runtime, not
+literal every-round Algorithm 1.
 
-ETC HGB and ETC Linear receive the identical shuffled order, forced prefix,
-taste budget, and unit training weights for a given order and multiplier. If
-the prefix contains at least two rows from each class, each fits once and
-freezes; its probabilities are reused across all `l01` values. If the shared
-prefix fails that feasibility gate, neither estimator is fit and the tail uses
-the Laplace-smoothed prefix prevalence. Candidate rows record the two class
-counts, feasibility flag, and fallback. The two ETC policies independently
-tune and select their pointwise taste multiplier. ETC HGB remains fixed to
-15-leaf HGB even when IGW Tree uses the River sensitivity backend.
+Every completed candidate is written atomically under `checkpoints/`; an
+identical command skips complete candidates. Selection minimizes mean realized
+total cost separately for each of the four tuned policies and `l01`. The two
+SquareCB.PMSide variants
+can select different gamma multipliers. The tuner exports both this
+best-vs-best comparison and matched-multiplier comparisons. Ties favor the
+value closest to 1 and then the smaller value.
 
-Every completed policy/`l01`/multiplier/order candidate is written atomically
-under `checkpoints/`; repeating the same command skips complete candidates.
-After all candidates exist, the tuner chooses the multiplier with the lowest
-mean realized total cost separately for each policy and `l01`; IGW Tree and IGW
-Linear never share a forced winner and their winning gammas may differ. The
-`igw_tree_vs_linear_by_order.csv/json`, `igw_tree_vs_linear.csv/json`, and
-`igw_tree_vs_linear_cost_difference.png` are therefore a separately tuned
-best-vs-best comparison. The matched-gamma exports
-`igw_tree_vs_linear_matched_by_order.csv/json`,
-`igw_tree_vs_linear_matched.csv/json`, and
-`igw_tree_vs_linear_matched_cost_difference.png` pair the candidates at every
-common multiplier for a configured estimator contrast. Both views pair the
-outer online order, but neither forces identical realized feedback histories.
-Ties favor the value closest to 1 and then the smaller value. Random is computed
-analytically after ETC HGB selection rather than by an inner Monte Carlo loop;
-it is not matched to ETC Linear. The selected output therefore contains five
-learned policies plus Random. The selection and plotted error bars reuse the
-same 20 orders, so these figures are an optimistic exploratory oracle envelope,
-not an unbiased evaluation of a preselected policy.
+The comparison artifacts use the `squarecb_pmside_tree_vs_linear` stem for
+by-order and aggregate best-vs-best CSV/JSON, corresponding `_matched` tables,
+and both separately tuned and matched `_cost_difference.{png,pdf}` figure
+pairs.
 
-Relative to a corresponding four-policy seven-multiplier design, ETC Linear
-adds 1,260 candidate rows. The 6,300 checkpoints are generated through 203
-reported execution groups: seven groups for each ETC estimator and 63 groups
-for each adaptive policy. Aggregation produces 315 policy/loss/multiplier rows,
-45 selected learned-policy points, and 54 final policy-plus-Random summaries.
-The matched-gamma IGW comparison has 1,260 order-level rows and 63 aggregated
-rows.
+Random is computed analytically after SquareCB.PMSide + HGB selection and
+matched to that selected policy's routing rate for each loss/order; it is not
+multiplier tuned.
+The same 20 orders are used for selection and error bars, so the selected curves
+are optimistic exploratory selection envelopes rather than unbiased evaluations
+of policies fixed in advance.
 
-At `n=12,648`, capped doubling with a 32-round maximum gap has 400 boundaries
-and permits at most 399 adaptive refits after feedback exists. Its last
-boundary is round 12,640, its final potentially stale tail is nine rounds, and
-its full-history row-work upper bound is 2,502,351. The new `m=0.03` ETC budget
-is 17 tastes, below HGB's 20-sample minimum leaf size, so ETC HGB cannot split.
-The `m=30` budget is capped at the complete 12,648-round horizon, so both ETC
-variants route every example strongly and have no tail-routing phase. Their
-`l11=1` routing metrics are identical across losses and orders.
+Finalization also writes complete selected-policy learning curves. For outcome
+`y_t`, a strong route costs 1 and a weak route costs `l01*y_t`. Tuned policies
+including scheduled PG-TS use the multiplier already selected at that loss,
+and analytic Random uses expected per-round cost
+`q + (1-q)*l01*y_t`, where `q` is the selected SquareCB.PMSide + HGB routing
+rate for that loss/order. Thus the Random trajectory is an analytic
+expectation, not sampled random actions.
 
-Candidate-level checkpoints make an identical-command resume safe, but the
-new seven-multiplier configuration must use a fresh output directory rather
-than the completed five-multiplier gap-32 directory. Finalization writes five
-figures, including both the separately tuned and matched-gamma IGW
-cost-difference plots. The gap-500, gap-100, and gap-32 revision-5 sweeps each
-completed all 4,500 five-multiplier candidate rows; their numerical results were
-not analyzed during the subsequent schedule changes. A gap-8 attempt contains
-3,902 of 4,500 checkpoints and no finalized tables, figures, summary, or ZIP.
+Before the online-order loop, revision 9 retains revision 8's shared fixed
+reference probability per eligible row from five-fold stratified shuffled
+cross-fitting.
+The splitter uses `--seed`; every fold trains the exact 15-leaf
+`ONLINE_HGB_PROFILE` on the complete selected 138D context and cached
+weak/strong-disagreement labels. Consequently, each row's probability comes
+from a model that did not train on that row. For each `l01`, the row-aligned
+reference action is `1[p_oof >= 1/l01]`. These probabilities and actions are
+fixed once and only reordered for each online permutation. They are strictly an
+offline evaluation comparator: no reference prediction, action, or outcome is
+provided to an online estimator. `cross_fitted_hgb_reference.npz` preserves the
+row-aligned float64 probabilities, fold assignments, IDs, and outcomes;
+`cross_fitted_hgb_reference_results.csv/json` summarizes its policy at each
+loss. The study fixes `--reference-folds 5`; fold count and split seed are part
+of the revision-9 manifest and fingerprint.
+
+The primary empirical regret curve is
+`sum_{s<=t}(cost_s-cost_s^reference)`. It can be negative. Finalization also
+computes `R_t/t` and retains `sum_{s<=t}(cost_s-y_s)` only as
+`cumulative_clairvoyant_excess_cost`, an explicitly named outcome-aware
+diagnostic. The latter is not the primary regret.
+`selected_learning_curves_by_order.npz` stores compact
+per-policy, loss, order, and round arrays plus reference metadata;
+`selected_learning_curves.csv` stores per-policy/loss/round means, sample SDs,
+SEMs, pointwise CI limits for both plotted regret metrics, and
+`confidence_level`, `confidence_df`, and `confidence_t_critical`. The exact CI
+fields are `cumulative_reference_regret_ci95_lower`,
+`cumulative_reference_regret_ci95_upper`,
+`average_reference_regret_ci95_lower`, and
+`average_reference_regret_ci95_upper`. There is deliberately no aggregate JSON
+copy. Each loss receives
+`selected_cumulative_reference_regret_l01-<float_slug>.{png,pdf}` and
+`selected_average_reference_regret_l01-<float_slug>.{png,pdf}`.
+All tuning figures with replicated-online-order uncertainty use fixed,
+pointwise, two-sided 95% Student-`t` intervals. This includes both learning
+curves, selected routing-rate versus accuracy, selected total cost, and both
+tree-versus-linear difference figures; the selected-multiplier figure has no
+uncertainty display. At each plotted point, `df=n_trials-1` and
+`margin=t.ppf(0.975,df)*sample_sd/sqrt(n_trials)`; the plotted limits are the
+mean plus or minus this margin, with no 0.5 multiplier. The intervals are
+pointwise rather than simultaneous or post-selection adjusted. Non-learning
+aggregate tables retain mean, sample SD, SEM, and `online_order_repeats`; the
+renderer derives their CI half-widths without adding new aggregate-table CI
+fields. The per-round learning CSV retains the explicit bounds listed above.
+
+`src/llm_routing_simulation/plot_style.py` is the single publication-style
+boundary. It exposes `AXIS_LABELS`, `METHOD_LABELS`,
+`PLOT_CONFIDENCE_LEVEL=0.95`, `LEGEND_FONT_SIZE=8.0`,
+`PUBLICATION_FIGSIZE=(7.0, 4.25)`,
+`PUBLICATION_FIGSIZE_SHORT=(7.0, 3.8)`, and `PUBLICATION_PNG_DPI=400`;
+`publication_pyplot` centralizes Matplotlib settings and
+`save_publication_figure` emits both formats. The public labels are exactly
+`PG-TS (Bayesian logistic)` and `Random`. Every tuning figure is title-free and
+footnote-free and is saved as a same-stem vector PDF and 400-DPI PNG. The
+selected-cost axes render as `$\ell_{01}$` and `Total cost`; the cumulative
+reference-regret axes render as `Round (t)` and `Regret (excess cost)`. This
+presentation metadata is outside the candidate-checkpoint fingerprint, so a
+compatible completed revision-9 sweep can regenerate its tables and publication
+figures with `--plot-only` without replaying an online policy.
+The final selected cost-versus-`l01` figure remains part of the output set.
+Because selection and trajectories reuse the same 20 orders, these are not holdout
+learning curves; the cross-fitting pertains to the fixed reference predictor,
+not hyperparameter selection.
+
+The full revision-9 design has 3,600 checkpoints, 180 execution groups and
+candidate aggregates, 36 multiplier selections, 900 selected order rows after
+Random, and 45 selected summaries. PG-TS contributes 900 checkpoints and 45
+groups/aggregates, with no fixed-policy rows. Omitting `--include-pgts` creates
+a distinct three-policy design rather than fixed PG-TS rows. The matched-gamma
+SquareCB.PMSide estimator comparison still contains 900 order rows and 45
+aggregates.
+The manifest design is exactly
+`pointwise-online-parameter-multiplier-sweep-v9` with implementation revision
+9. Its `candidate_counts` records
+`multiplier_tuned_checkpoints=3600`, `pgts_prior_tuned_checkpoints=900`,
+`total_checkpoints=3600`, `multiplier_tuned_execution_groups=180`,
+`pgts_prior_tuned_execution_groups=45`, and `total_execution_groups=180`.
+
+Pure doubling has 14 boundaries through round 8,192 for `n=12,648`, permitting
+at most 13 post-feedback snapshot refits and leaving a potentially stale final
+epoch of 4,457 rounds. Scheduled PG-TS has at most 14 posterior draws/model
+updates in total: the round-1 draw plus 13 later draws. It can have fewer later
+draws when an epoch reveals no new action-1 feedback. With `M=15`, this is at
+most 210 Gibbs transitions per trajectory rather than `15 * 12,648` in the
+historical faithful design.
+
+Revision-9 fingerprints are intentionally incompatible with revision-8 and
+earlier output directories. Completed revision-3 doubling, revision-4
+Fibonacci, and revision-5 capped-doubling artifacts, the incomplete gap-8
+attempt, the superseded gap-32 seven-multiplier design, revision-7
+outcome-oracle plots, and the superseded revision-8 fixed-PG-TS reference-regret
+plan remain historical records described in `EXPERIMENTS.md`. The full study
+uses the fresh
+`boolq-138d-cbpside-squarecb-pmside-pgts-prior-tuned-results` directory.
 
 ### `prompt_embeddings.py`
 
@@ -357,19 +441,24 @@ or environment interfaces.
   revision-4 Fibonacci artifacts were completed, although their numerical
   results were not analyzed during the revision-5 code change. Its completed
   revision-5 gap-500, gap-100, and gap-32 five-multiplier artifacts are retained.
-  A later gap-8 attempt is incomplete at 3,902 of 4,500 checkpoints. The current
-  planned revision-5 study returns to default capped-doubling global-round
-  epochs with a 32-round maximum gap for CBPSide and both IGW variants and
-  expands the common multiplier grid to
-  `0.03, 0.1, 0.3, 1, 3, 10, 30`. It keeps explicit Fibonacci and pure-doubling
-  boundary choices for new revision-5 comparisons, retains independently tuned
-  ETC Linear beside fixed 15-leaf ETC HGB, and keeps the matched IGW Tree/IGW
-  Linear comparison. The optional weighted River
-  Hoeffding sensitivity changes IGW Tree only. It exports both separately tuned
-  best-vs-best and fixed-multiplier matched-gamma IGW comparisons;
-  action-dependent histories may differ in either view. The branch also exposes
-  the opt-in faithful PG-TS comparator without changing legacy revision-5
-  fingerprints when that option is absent.
+  A later gap-8 attempt is incomplete at 3,902 of 4,500 checkpoints, and the
+  gap-32 seven-multiplier design is retained as a superseded plan. The current
+  revision-9 study disables both ETC variants, retains the five-value
+  multiplier grid, and tunes CBPSide, SquareCB.PMSide + HGB,
+  SquareCB.PMSide + linear logistic, and scheduled PG-TS. It exports
+  separately tuned best-vs-best and fixed-multiplier matched-gamma
+  SquareCB.PMSide estimator comparisons; action-dependent histories may differ
+  in either view. The optional weighted River sensitivity changes only
+  SquareCB.PMSide + HGB.
+  PG-TS retains boundary-scheduled posterior updates and 15 Gibbs transitions,
+  while tuning `--pgts-base-prior-std * multiplier` pointwise. Analytic Random is
+  still matched to selected SquareCB.PMSide + HGB, not to an ETC policy. The revision-6
+  every-round Algorithm 1 implementation remains historical provenance only.
+  Finalization always records compact by-order and aggregate per-round cost,
+  fixed cross-fitted HGB-15 reference-policy regret, average regret `R_t/t`,
+  and explicitly named outcome-aware excess-cost diagnostics. Per-loss
+  PDF/400-DPI-PNG pairs plot both cumulative and average reference-policy
+  regret.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather
 than inferring research intent from implementation details alone.

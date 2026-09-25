@@ -8,6 +8,8 @@ larger paired-order tuning design and its candidate-level checkpoints.
 from __future__ import annotations
 
 import argparse
+import base64
+import csv
 import hashlib
 import json
 import math
@@ -27,6 +29,18 @@ from llm_routing_simulation.online_tree import (
     ONLINE_LOGISTIC_PROFILE,
     make_tree_backend as _make_tree_backend_impl,
 )
+from llm_routing_simulation.plot_style import (
+    AXIS_LABELS,
+    METHOD_LABELS,
+    PLOT_CONFIDENCE_LEVEL,
+    PUBLICATION_FIGSIZE,
+    PUBLICATION_FIGSIZE_SHORT,
+    PUBLICATION_PNG_DPI,
+    publication_pyplot,
+    save_publication_figure,
+    student_t_critical_value,
+    student_t_half_width,
+)
 from llm_routing_simulation.run import (
     DEFAULT_L01_VALUES,
     _jsonable,
@@ -36,27 +50,25 @@ from llm_routing_simulation.run import (
 )
 
 
-DEFAULT_MULTIPLIERS = (0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0)
+DEFAULT_MULTIPLIERS = (0.1, 0.3, 1.0, 3.0, 10.0)
 ADAPTIVE_UPDATE_SCHEDULES = ("capped-doubling", "fibonacci", "doubling")
-DEFAULT_ADAPTIVE_UPDATE_SCHEDULE = "capped-doubling"
+DEFAULT_ADAPTIVE_UPDATE_SCHEDULE = "doubling"
 DEFAULT_ADAPTIVE_MAX_ROUND_GAP = 32
-TUNING_IMPLEMENTATION_REVISION = 5
-PGTS_TUNING_IMPLEMENTATION_REVISION = 6
+DEFAULT_REFERENCE_FOLDS = 5
+TUNING_IMPLEMENTATION_REVISION = 9
 POLICY_CBPSIDE = "CBPSide"
-POLICY_ETC = "ETC"
-POLICY_ETC_LINEAR = "ETCLinear"
-POLICY_IGW_TREE = "IGW"
-POLICY_IGW_LINEAR = "IGWLinear"
+POLICY_IGW_TREE = "SquareCB.PMSide"
+POLICY_IGW_LINEAR = "SquareCB.PMSideLinear"
 POLICY_PGTS = "PGTS"
-TUNED_POLICIES = (
+BASE_TUNED_POLICIES = (
     POLICY_CBPSIDE,
-    POLICY_ETC,
-    POLICY_ETC_LINEAR,
     POLICY_IGW_LINEAR,
     POLICY_IGW_TREE,
 )
-FIXED_POLICIES = (POLICY_PGTS,)
-POLICY_OUTPUT_ORDER = (*TUNED_POLICIES, *FIXED_POLICIES, "Random")
+TUNED_POLICIES = (*BASE_TUNED_POLICIES, POLICY_PGTS)
+# Retained as an explicit contract: revision 9 has no untuned learned policy.
+FIXED_POLICIES: tuple[str, ...] = ()
+POLICY_OUTPUT_ORDER = (*TUNED_POLICIES, "Random")
 POLICY_OUTPUT_RANK = {
     policy: index for index, policy in enumerate(POLICY_OUTPUT_ORDER)
 }
@@ -70,13 +82,60 @@ AGGREGATE_METRICS = (
     "model_updates",
     "last_model_training_count",
 )
+INTERNAL_ACTIONS_KEY = "_internal_actions_packbits_base64"
+INTERNAL_ACTION_COUNT_KEY = "_internal_actions_count"
+INTERNAL_ACTION_BITORDER_KEY = "_internal_actions_bitorder"
+INTERNAL_ACTION_FIELDS = (
+    INTERNAL_ACTIONS_KEY,
+    INTERNAL_ACTION_COUNT_KEY,
+    INTERNAL_ACTION_BITORDER_KEY,
+)
+ACTION_BITORDER = "little"
+LEARNING_CURVE_NPZ = "selected_learning_curves_by_order.npz"
+LEARNING_CURVE_CSV = "selected_learning_curves.csv"
+REFERENCE_PREDICTIONS_NPZ = "cross_fitted_hgb_reference.npz"
+REFERENCE_RESULTS_CSV = "cross_fitted_hgb_reference_results.csv"
+REFERENCE_RESULTS_JSON = "cross_fitted_hgb_reference_results.json"
+LEARNING_CURVE_PLOT_PREFIX = "selected_cumulative_reference_regret_l01-"
+AVERAGE_REGRET_PLOT_PREFIX = "selected_average_reference_regret_l01-"
+LEGACY_LEARNING_CURVE_PLOT_PREFIX = "selected_cumulative_cost_l01-"
+REVISION7_REGRET_PLOT_PREFIX = "selected_cumulative_regret_l01-"
+REALIZED_COST_INCREMENT_DEFINITION = (
+    "a_t + (1-a_t) * l01 * y_t, where a_t=1 routes strong and y_t=1 "
+    "means weak/strong disagreement"
+)
+CLAIRVOYANT_COST_INCREMENT_DEFINITION = (
+    "y_t for l11=1 and l01>=1 (clairvoyant per-round minimum)"
+)
+REGRET_INCREMENT_DEFINITION = (
+    "actual cost increment minus the realized cost of the fixed stratified "
+    "cross-fitted HGB-15 reference action; cumulative regret is its prefix sum"
+)
+CLAIRVOYANT_EXCESS_INCREMENT_DEFINITION = (
+    "actual cost increment minus y_t; retained only as an explicitly named "
+    "outcome-aware diagnostic, not as the primary regret comparator"
+)
+RANDOM_COST_INCREMENT_DEFINITION = (
+    "q * 1 + (1-q) * l01 * y_t, with q equal to the selected "
+    "SquareCB.PMSide tree routing rate for the same order and l01"
+)
+LEARNING_CURVE_SELECTION_WARNING = (
+    "For multiplier-tuned policies, selection and curve evaluation use the "
+    "same shuffled orders; their selected learning curves are optimistic "
+    "exploratory envelopes."
+)
+
+
+def _active_tuned_policies(args: argparse.Namespace) -> tuple[str, ...]:
+    """Return the multiplier-tuned policies enabled for this sweep."""
+    return TUNED_POLICIES if args.include_pgts else BASE_TUNED_POLICIES
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Tune CBPSide beta, IGW gamma, and ETC tastes pointwise over "
-            "paired shuffled online orders."
+            "Tune CBPSide beta and SquareCB.PMSide gamma pointwise over paired "
+            "shuffled online orders, with optional PG-TS prior-scale tuning."
         )
     )
     parser.add_argument("--cache", required=True, type=Path)
@@ -97,8 +156,21 @@ def _parser() -> argparse.ArgumentParser:
         type=float,
         nargs="+",
         default=list(DEFAULT_MULTIPLIERS),
+        help=(
+            "Common grid applied to CBPSide beta, SquareCB.PMSide gamma, and "
+            "the PG-TS prior standard deviation when PG-TS is enabled"
+        ),
     )
     parser.add_argument("--online-order-repeats", type=int, default=20)
+    parser.add_argument(
+        "--reference-folds",
+        type=int,
+        default=DEFAULT_REFERENCE_FOLDS,
+        help=(
+            "Stratified folds for the fixed out-of-fold HGB-15 reference "
+            "policy used by learning-regret plots (default: 5)"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--policy-seed",
@@ -112,10 +184,10 @@ def _parser() -> argparse.ArgumentParser:
         choices=ADAPTIVE_UPDATE_SCHEDULES,
         default=DEFAULT_ADAPTIVE_UPDATE_SCHEDULE,
         help=(
-            "Global-round refit boundaries for CBPSide and both IGW variants; "
-            "capped doubling starts 1,2,4,8,... then limits consecutive "
-            "boundaries to --adaptive-max-round-gap; Fibonacci and pure "
-            "doubling remain available as explicit comparison schedules"
+            "Global-round refit/draw boundaries for CBPSide, both "
+            "SquareCB.PMSide variants, and scheduled PG-TS when enabled; pure "
+            "doubling (the default) updates at 1,2,4,8,...; capped doubling "
+            "and Fibonacci remain available as explicit comparison schedules"
         ),
     )
     parser.add_argument(
@@ -134,22 +206,28 @@ def _parser() -> argparse.ArgumentParser:
         "--include-pgts",
         action="store_true",
         help=(
-            "Include the fixed PG-TS Algorithm 1 comparator. This literal "
-            "every-round Gibbs implementation is intentionally opt-in because "
-            "it is substantially more expensive and requires polyagamma."
+            "Include PG-TS and tune its Gaussian prior standard deviation over "
+            "the common multiplier grid. Its posterior is sampled at the "
+            "configured adaptive-update boundaries; polyagamma is required."
         ),
     )
     parser.add_argument(
         "--pgts-gibbs-steps",
         type=int,
         default=15,
-        help="Gibbs transitions per PG-TS online decision (default: 15)",
+        help="Gibbs transitions per scheduled PG-TS posterior draw (default: 15)",
     )
     parser.add_argument(
+        "--pgts-base-prior-std",
         "--pgts-prior-std",
+        dest="pgts_prior_std",
+        metavar="STD",
         type=float,
         default=1.0,
-        help="Isotropic zero-mean Gaussian PG-TS prior standard deviation",
+        help=(
+            "Base isotropic zero-mean Gaussian PG-TS prior standard deviation; "
+            "each candidate multiplies it by --multipliers (default: 1)"
+        ),
     )
 
     parser.add_argument("--cbpside-base-beta-scale", type=float, default=0.5)
@@ -166,27 +244,37 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--squarecb-pmside-base-gamma",
         "--igw-base-gamma",
+        dest="igw_base_gamma",
+        metavar="GAMMA",
         type=float,
         help="Base gamma; default is sqrt(the selected online horizon)",
     )
-    parser.add_argument("--igw-mu", type=float, default=2.0)
-    parser.add_argument("--igw-min-propensity", type=float, default=0.1)
     parser.add_argument(
-        "--etc-base-tastes",
+        "--squarecb-pmside-mu",
+        "--igw-mu",
+        dest="igw_mu",
+        metavar="MU",
         type=float,
-        help="Base forced tastes; default is n^(2/3) before multiplier and ceiling",
+        default=2.0,
     )
-
+    parser.add_argument(
+        "--squarecb-pmside-min-propensity",
+        "--igw-min-propensity",
+        dest="igw_min_propensity",
+        metavar="MIN_PROPENSITY",
+        type=float,
+        default=0.1,
+    )
     parser.add_argument(
         "--tree-estimator",
         choices=("hgb", "river-hoeffding"),
         default="hgb",
         help=(
-            "Use the established HGB oracle or an explicitly different weighted "
-            "incremental Hoeffding tree for IGW Tree; ETC HGB remains fixed to "
-            "the established 15-leaf HGB oracle, while ETC Linear and IGW "
-            "Linear always use weighted logistic regression"
+            "Use the established HGB estimator or an explicitly different weighted "
+            "incremental Hoeffding tree for SquareCB.PMSide; its linear "
+            "variant always uses weighted logistic regression"
         ),
     )
     parser.add_argument("--hgb-max-leaf-nodes", type=int, default=15)
@@ -200,6 +288,8 @@ def _parser() -> argparse.ArgumentParser:
 def _validate_args(args: argparse.Namespace) -> None:
     if args.online_order_repeats < 2:
         raise SystemExit("Multiplier tuning requires at least two shuffled orders")
+    if args.reference_folds < 2:
+        raise SystemExit("--reference-folds must be at least two")
     if args.jobs == 0:
         raise SystemExit("--jobs must be positive or -1")
     if args.jobs < -1:
@@ -247,16 +337,13 @@ def _validate_args(args: argparse.Namespace) -> None:
     if args.igw_base_gamma is not None and (
         not math.isfinite(args.igw_base_gamma) or args.igw_base_gamma <= 0.0
     ):
-        raise SystemExit("The IGW base gamma must be positive")
+        raise SystemExit("The SquareCB.PMSide base gamma must be positive")
     if not math.isfinite(args.igw_mu) or args.igw_mu < 2.0:
-        raise SystemExit("IGW mu must be at least two")
+        raise SystemExit("SquareCB.PMSide mu must be at least two")
     if not 0.0 < args.igw_min_propensity <= 1.0:
-        raise SystemExit("IGW minimum propensity must be in (0, 1]")
-    if args.etc_base_tastes is not None and (
-        not math.isfinite(args.etc_base_tastes)
-        or args.etc_base_tastes <= 0.0
-    ):
-        raise SystemExit("The ETC base taste budget must be positive")
+        raise SystemExit(
+            "SquareCB.PMSide minimum propensity must be in (0, 1]"
+        )
     if args.hgb_max_leaf_nodes != 15:
         raise SystemExit(
             "This tuning study is fixed to the agreed 15-leaf HGB profile"
@@ -408,14 +495,6 @@ def _tree_settings(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _etc_hgb_settings(args: argparse.Namespace) -> dict[str, Any]:
-    """Return the fixed nonlinear ETC oracle independently of IGW options."""
-    return {
-        "kind": "hgb",
-        "hgb_max_leaf_nodes": args.hgb_max_leaf_nodes,
-    }
-
-
 def _linear_settings() -> dict[str, Any]:
     """Return the fixed linear oracle shared by the linear policy variants."""
     return {"kind": "logistic", **ONLINE_LOGISTIC_PROFILE}
@@ -443,17 +522,15 @@ def _method_label(policy: str, tree_settings: dict[str, Any]) -> str:
     if policy == POLICY_CBPSIDE:
         return "CBPSide (linear logistic)"
     if policy == POLICY_PGTS:
-        return "PG-TS (Bayesian logistic)"
-    if policy == POLICY_ETC_LINEAR:
-        return "ETC + linear logistic"
+        return METHOD_LABELS["pgts"]
     if policy == POLICY_IGW_LINEAR:
-        return "IGW + linear logistic"
+        return "SquareCB.PMSide + linear logistic"
     if tree_settings["kind"] == "hgb":
         estimator = f"HGB leaves={tree_settings['hgb_max_leaf_nodes']}"
     else:
         estimator = f"Hoeffding tree depth<={tree_settings['river_max_depth']}"
     if policy == POLICY_IGW_TREE:
-        return f"IGW + {estimator}"
+        return f"SquareCB.PMSide + {estimator}"
     return f"{policy} ({estimator})"
 
 
@@ -498,14 +575,13 @@ def _base_row(
             if policy == POLICY_PGTS
             else (
                 "linear-logistic"
-                if policy
-                in {POLICY_CBPSIDE, POLICY_ETC_LINEAR, POLICY_IGW_LINEAR}
+                if policy in {POLICY_CBPSIDE, POLICY_IGW_LINEAR}
                 else tree_settings["kind"]
             )
         ),
         "tree_estimator": (
             tree_settings["kind"]
-            if policy in {POLICY_ETC, POLICY_IGW_TREE}
+            if policy == POLICY_IGW_TREE
             and tree_settings["kind"] in {"hgb", "river-hoeffding"}
             else None
         ),
@@ -541,6 +617,64 @@ def _finish_row(
     return row
 
 
+def _encode_action_payload(actions: np.ndarray) -> dict[str, Any]:
+    """Return a compact JSON-safe internal representation of binary actions."""
+    array = np.asarray(actions)
+    if array.ndim != 1:
+        raise ValueError("Online actions must be a one-dimensional array")
+    if not np.all((array == 0) | (array == 1)):
+        raise ValueError("Online actions must be binary")
+    packed = np.packbits(
+        array.astype(np.uint8, copy=False), bitorder=ACTION_BITORDER
+    )
+    return {
+        INTERNAL_ACTIONS_KEY: base64.b64encode(packed.tobytes()).decode("ascii"),
+        INTERNAL_ACTION_COUNT_KEY: int(array.size),
+        INTERNAL_ACTION_BITORDER_KEY: ACTION_BITORDER,
+    }
+
+
+def _decode_action_payload(row: dict[str, Any]) -> np.ndarray:
+    """Decode and validate a checkpoint's compact binary action trajectory."""
+    try:
+        encoded = str(row[INTERNAL_ACTIONS_KEY])
+        count = int(row[INTERNAL_ACTION_COUNT_KEY])
+        bitorder = str(row[INTERNAL_ACTION_BITORDER_KEY])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Checkpoint is missing its internal action payload") from exc
+    if count < 0 or bitorder != ACTION_BITORDER:
+        raise RuntimeError("Checkpoint has invalid internal action metadata")
+    try:
+        packed = np.frombuffer(
+            base64.b64decode(encoded, validate=True), dtype=np.uint8
+        )
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("Checkpoint has an invalid base64 action payload") from exc
+    required_bytes = (count + 7) // 8
+    if packed.size != required_bytes:
+        raise RuntimeError("Checkpoint action payload length is inconsistent")
+    actions = np.unpackbits(packed, bitorder=bitorder)[:count].astype(bool)
+    if count != int(row.get("examples", count)):
+        raise RuntimeError("Checkpoint action count differs from its examples")
+    return actions
+
+
+def _attach_action_payload(
+    row: dict[str, Any], actions: np.ndarray
+) -> dict[str, Any]:
+    row.update(_encode_action_payload(actions))
+    return row
+
+
+def _strip_internal_fields(row: dict[str, Any]) -> dict[str, Any]:
+    """Remove checkpoint-only data before writing normal result tables."""
+    return {
+        name: value
+        for name, value in row.items()
+        if name not in INTERNAL_ACTION_FIELDS
+    }
+
+
 def _simulate_pgts_candidate(
     normalized_features: np.ndarray,
     outcomes: np.ndarray,
@@ -550,46 +684,70 @@ def _simulate_pgts_candidate(
     l11: float,
     gibbs_steps: int,
     prior_std: float,
+    multiplier: float,
     order_index: int,
     order_seed: int,
     policy_seed: int,
+    update_schedule: str,
+    update_max_round_gap: int = DEFAULT_ADAPTIVE_MAX_ROUND_GAP,
 ) -> dict[str, Any]:
-    """Run literal every-round PG-TS with action-1-only feedback."""
+    """Run scheduled PG-TS posterior draws with action-1-only feedback."""
     # Keep the optional dependency out of legacy tuner imports and executions.
     from llm_routing_simulation.pgts import PolyaGammaThompsonSampler
 
     x_all = normalized_features[permutation]
     y_all = outcomes[permutation]
     n, dimension = x_all.shape
+    effective_prior_std = float(prior_std * multiplier)
     sampler = PolyaGammaThompsonSampler(
         dimension,
         gibbs_steps=gibbs_steps,
-        prior_std=prior_std,
+        prior_std=effective_prior_std,
         seed=policy_seed,
     )
     revealed_x = np.empty((n, dimension), dtype=np.float64)
     revealed_y = np.empty(n, dtype=np.int8)
+    actions_all = np.zeros(n, dtype=bool)
     revealed_count = 0
     routed = 0
     correct = 0
+    theta: np.ndarray | None = None
+    state_dirty = False
+    posterior_eligible_boundary_rounds: list[int] = []
+    posterior_draw_rounds: list[int] = []
+    last_posterior_training_count = 0
 
     try:
-        for context, outcome in zip(x_all, y_all):
-            # Algorithm 1 draws a new final Gibbs state on every online round,
-            # even when the action-0 round leaves the revealed history unchanged.
-            theta = sampler.draw_theta(
-                revealed_x[:revealed_count], revealed_y[:revealed_count]
-            )
-            probability = float(LogCBPSideAT.sigmoid(context @ theta))
+        for boundary, start, stop in _adaptive_epochs(
+            n, update_schedule, update_max_round_gap
+        ):
+            posterior_eligible_boundary_rounds.append(int(boundary))
+            # This is a runtime-saving approximation to Algorithm 1: sample
+            # from feedback available before the boundary, then freeze that
+            # sampled theta for every action in the following epoch.
+            if theta is None or state_dirty:
+                theta = sampler.draw_theta(
+                    revealed_x[:revealed_count], revealed_y[:revealed_count]
+                )
+                posterior_draw_rounds.append(int(boundary))
+                last_posterior_training_count = revealed_count
+                state_dirty = False
+            epoch_x = x_all[start:stop]
+            probability = np.asarray(LogCBPSideAT.sigmoid(epoch_x @ theta))
             loss_0 = l01 * probability
             loss_1 = 1.0 + (l11 - 1.0) * probability
-            action = int(loss_1 <= loss_0)
-            routed += action
-            correct += int(action == 1 or outcome == 0)
-            if action == 1:
-                revealed_x[revealed_count] = context
-                revealed_y[revealed_count] = outcome
-                revealed_count += 1
+            actions = loss_1 <= loss_0
+            actions_all[start:stop] = actions
+            epoch_y = y_all[start:stop]
+            action_count = int(np.count_nonzero(actions))
+            routed += action_count
+            correct += int(np.count_nonzero(actions | (epoch_y == 0)))
+            if action_count:
+                next_count = revealed_count + action_count
+                revealed_x[revealed_count:next_count] = epoch_x[actions]
+                revealed_y[revealed_count:next_count] = epoch_y[actions]
+                revealed_count = next_count
+                state_dirty = True
     except ImportError as exc:
         raise RuntimeError(
             "PG-TS requires its optional dependency. Install it with "
@@ -597,42 +755,74 @@ def _simulate_pgts_candidate(
             "--include-pgts."
         ) from exc
 
+    schedule_slug = _schedule_slug(update_schedule, update_max_round_gap)
+    draw_count = len(posterior_draw_rounds)
     row = _base_row(
         policy=POLICY_PGTS,
         l01=l01,
         l11=l11,
-        multiplier=None,
-        parameter_name="gibbs_steps",
-        base_parameter=float(gibbs_steps),
-        effective_parameter=float(gibbs_steps),
+        multiplier=multiplier,
+        parameter_name="prior_std",
+        base_parameter=float(prior_std),
+        effective_parameter=effective_prior_std,
         order_index=order_index,
         order_seed=order_seed,
         policy_seed=policy_seed,
         examples=n,
         tree_settings={},
-        update_schedule="literal_every_round_gibbs",
+        update_schedule=(
+            f"global_round_{schedule_slug}_posterior_draw_before_action"
+        ),
     )
     row.update(
         {
             "pgts_gibbs_steps": int(gibbs_steps),
             "pgts_prior_mean": 0.0,
-            "pgts_prior_std": float(prior_std),
+            "pgts_base_prior_std": float(prior_std),
+            "pgts_prior_std_multiplier": float(multiplier),
+            "pgts_prior_std": effective_prior_std,
             "pgts_context_preprocessing": (
                 "row_l2_normalized_with_max_one_denominator_then_intercept"
             ),
-            "pgts_posterior_draw": "final_draw_after_M_gibbs_transitions",
+            "pgts_posterior_draw": (
+                "final_draw_after_M_gibbs_transitions_at_each_actual_"
+                "scheduled_update"
+            ),
+            "pgts_algorithm1_exact": False,
+            "pgts_schedule_approximation": (
+                "initial prior draw at round 1; at later configured boundaries "
+                "resample only when new action-1 feedback exists; theta frozen "
+                "for every action within each epoch"
+            ),
             "feedback_protocol": "action_1_only_binary_disagreement",
             "inverse_propensity_weighting": False,
-            "posterior_draw_rounds": int(n),
-            "total_gibbs_transitions": int(n * gibbs_steps),
+            "posterior_eligible_boundary_rounds": (
+                posterior_eligible_boundary_rounds
+            ),
+            "posterior_eligible_boundary_count": int(
+                len(posterior_eligible_boundary_rounds)
+            ),
+            "posterior_draw_rounds": posterior_draw_rounds,
+            "posterior_boundary_draw_count": int(draw_count),
+            "posterior_skipped_clean_boundary_count": int(
+                len(posterior_eligible_boundary_rounds) - draw_count
+            ),
+            "total_gibbs_transitions": int(draw_count * gibbs_steps),
+            "last_posterior_training_count": int(
+                last_posterior_training_count
+            ),
+            "final_revealed_count": int(revealed_count),
         }
     )
-    return _finish_row(
-        row,
-        routed=routed,
-        correct=correct,
-        model_updates=n,
-        last_training_count=revealed_count,
+    return _attach_action_payload(
+        _finish_row(
+            row,
+            routed=routed,
+            correct=correct,
+            model_updates=draw_count,
+            last_training_count=last_posterior_training_count,
+        ),
+        actions_all,
     )
 
 
@@ -685,6 +875,7 @@ def _simulate_cbpside_candidate(
     last_training_count = 0
     routed = 0
     correct = 0
+    actions_all = np.zeros(n, dtype=bool)
 
     for boundary, start, stop in _adaptive_epochs(
         n, update_schedule, update_max_round_gap
@@ -717,6 +908,7 @@ def _simulate_cbpside_candidate(
         radius = np.minimum(beta_scale * leverage, confidence_cap)
         confident = np.abs(predicted - threshold) >= radius
         actions = np.logical_or(~confident, predicted >= threshold)
+        actions_all[start:stop] = actions
 
         epoch_y = y_all[start:stop]
         routed += int(np.count_nonzero(actions))
@@ -751,12 +943,15 @@ def _simulate_cbpside_candidate(
         f"frozen_within_each_{schedule_slug}_epoch"
     )
     row["theta_warm_started"] = not zero_start
-    return _finish_row(
-        row,
-        routed=routed,
-        correct=correct,
-        model_updates=model_updates,
-        last_training_count=last_training_count,
+    return _attach_action_payload(
+        _finish_row(
+            row,
+            routed=routed,
+            correct=correct,
+            model_updates=model_updates,
+            last_training_count=last_training_count,
+        ),
+        actions_all,
     )
 
 
@@ -783,13 +978,17 @@ def _simulate_igw_candidate(
     update_schedule: str,
     update_max_round_gap: int = DEFAULT_ADAPTIVE_MAX_ROUND_GAP,
 ) -> dict[str, Any]:
-    """Run IGW with predictor snapshots updated at scheduled global rounds."""
+    """Run SquareCB.PMSide with scheduled predictor snapshots."""
     if policy not in {POLICY_IGW_TREE, POLICY_IGW_LINEAR}:
-        raise ValueError(f"Unsupported IGW policy identifier: {policy}")
+        raise ValueError(
+            f"Unsupported SquareCB.PMSide policy identifier: {policy}"
+        )
     if (policy == POLICY_IGW_LINEAR) != (
         estimator_settings["kind"] == "logistic"
     ):
-        raise ValueError("IGW policy identifier and estimator kind do not match")
+        raise ValueError(
+            "SquareCB.PMSide policy identifier and estimator kind do not match"
+        )
     x_all = contexts[permutation]
     y_all = outcomes[permutation]
     n = x_all.shape[0]
@@ -806,6 +1005,7 @@ def _simulate_igw_candidate(
     model_updates = 0
     routed = 0
     correct = 0
+    actions_all = np.zeros(n, dtype=bool)
 
     for boundary, start, stop in _adaptive_epochs(
         n, update_schedule, update_max_round_gap
@@ -852,6 +1052,7 @@ def _simulate_igw_candidate(
             worse_probability,
         )
         actions = uniforms[start:stop] < probability_1
+        actions_all[start:stop] = actions
         epoch_y = y_all[start:stop]
         routed += int(np.count_nonzero(actions))
         correct += int(np.count_nonzero(actions | (epoch_y == 0)))
@@ -886,8 +1087,8 @@ def _simulate_igw_candidate(
     )
     row.update(
         {
-            "igw_mu": float(mu),
-            "igw_min_propensity": float(min_propensity),
+            "squarecb_pmside_mu": float(mu),
+            "squarecb_pmside_min_propensity": float(min_propensity),
             "inverse_propensity_weight_cap": float(1.0 / min_propensity),
             "estimator_feedback_update": (
                 f"buffered_incremental_at_{schedule_slug}_boundaries"
@@ -902,113 +1103,16 @@ def _simulate_igw_candidate(
             ),
         }
     )
-    return _finish_row(
-        row,
-        routed=routed,
-        correct=correct,
-        model_updates=model_updates,
-        last_training_count=trained_count,
+    return _attach_action_payload(
+        _finish_row(
+            row,
+            routed=routed,
+            correct=correct,
+            model_updates=model_updates,
+            last_training_count=trained_count,
+        ),
+        actions_all,
     )
-
-
-def _simulate_etc_candidates(
-    contexts: np.ndarray,
-    outcomes: np.ndarray,
-    permutation: np.ndarray,
-    *,
-    policy: str,
-    l01_values: Sequence[float],
-    l11: float,
-    multiplier: float,
-    base_tastes: float,
-    order_index: int,
-    order_seed: int,
-    policy_seed: int,
-    estimator_settings: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Fit an ETC estimator at most once and reuse tail predictions by l01."""
-    if policy not in {POLICY_ETC, POLICY_ETC_LINEAR}:
-        raise ValueError(f"Unsupported ETC policy identifier: {policy}")
-    if (policy == POLICY_ETC_LINEAR) != (
-        estimator_settings["kind"] == "logistic"
-    ):
-        raise ValueError("ETC policy identifier and estimator kind do not match")
-    x_all = contexts[permutation]
-    y_all = outcomes[permutation]
-    n = x_all.shape[0]
-    forced_tastes = min(n, max(1, int(math.ceil(multiplier * base_tastes))))
-    prefix_y = y_all[:forced_tastes]
-    label_counts = np.bincount(prefix_y, minlength=2)
-    backend = None
-    model_updates = 0
-    if _tree_is_feasible(label_counts):
-        backend = make_tree_backend(estimator_settings, seed=policy_seed)
-        weights = np.ones(forced_tastes, dtype=np.float64)
-        if backend.supports_incremental:
-            backend.update_many(x_all[:forced_tastes], prefix_y, weights)
-        else:
-            backend.fit_all(x_all[:forced_tastes], prefix_y, weights)
-        model_updates = 1
-
-    if forced_tastes < n:
-        if backend is None:
-            probability = (label_counts[1] + 1.0) / (forced_tastes + 2.0)
-            tail_probability = np.full(n - forced_tastes, probability)
-        else:
-            tail_probability = np.clip(
-                backend.predict_proba(x_all[forced_tastes:]), 0.0, 1.0
-            )
-    else:
-        tail_probability = np.asarray([], dtype=np.float64)
-
-    rows: list[dict[str, Any]] = []
-    for l01 in l01_values:
-        threshold = 1.0 / (1.0 + l01 - l11)
-        tail_actions = tail_probability >= threshold
-        routed = forced_tastes + int(np.count_nonzero(tail_actions))
-        correct = forced_tastes + int(
-            np.count_nonzero(tail_actions | (y_all[forced_tastes:] == 0))
-        )
-        row = _base_row(
-            policy=policy,
-            l01=l01,
-            l11=l11,
-            multiplier=multiplier,
-            parameter_name="forced_tastes",
-            base_parameter=base_tastes,
-            effective_parameter=forced_tastes,
-            order_index=order_index,
-            order_seed=order_seed,
-            policy_seed=policy_seed,
-            examples=n,
-            tree_settings=estimator_settings,
-            update_schedule="forced_taste_prefix_fit_then_freeze",
-        )
-        row["forced_taste_rounding"] = "ceil(multiplier * base_tastes), capped at n"
-        row["estimator_feedback_update"] = "unit_weight_prefix_fit_then_freeze"
-        row["forced_prefix_label_counts"] = [
-            int(label_counts[0]),
-            int(label_counts[1]),
-        ]
-        row["estimator_fit_feasible"] = backend is not None
-        row["estimator_fallback"] = (
-            None
-            if backend is not None
-            else "laplace_smoothed_forced_prefix_prevalence"
-        )
-        row["comparison_role"] = (
-            "linear_oracle" if policy == POLICY_ETC_LINEAR else "nonlinear_tree_oracle"
-        )
-        rows.append(
-            _finish_row(
-                row,
-                routed=routed,
-                correct=correct,
-                model_updates=model_updates,
-                last_training_count=(forced_tastes if model_updates else 0),
-            )
-        )
-    return rows
 
 
 def _parallel_map(function, tasks: list[dict[str, Any]], jobs: int):
@@ -1073,10 +1177,18 @@ def _load_checkpoint(path: Path, fingerprint: str) -> dict[str, Any] | None:
     row = json.loads(path.read_text(encoding="utf-8"))
     if row.get("config_fingerprint") != fingerprint:
         raise RuntimeError(f"Checkpoint has a different configuration: {path}")
+    try:
+        _decode_action_payload(row)
+    except RuntimeError:
+        # A pre-learning-curve or partially written checkpoint is incomplete
+        # for this design.  Treat it as missing so a normal resume reruns only
+        # that trajectory; --plot-only will report it as missing.
+        return None
     return row
 
 
 def _save_checkpoint(path: Path, row: dict[str, Any], fingerprint: str) -> None:
+    _decode_action_payload(row)
     payload = dict(row)
     payload["config_fingerprint"] = fingerprint
     _atomic_write_json(path, payload)
@@ -1110,7 +1222,8 @@ def _aggregate_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result = {
             name: value
             for name, value in first.items()
-            if name
+            if name not in INTERNAL_ACTION_FIELDS
+            and name
             not in {
                 *AGGREGATE_METRICS,
                 "order_run",
@@ -1122,7 +1235,8 @@ def _aggregate_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result["online_order_repeats"] = len(group)
         result["order_seeds"] = [int(row["order_seed"]) for row in group]
         result["error_bar_definition"] = (
-            "sample standard deviation across paired shuffled online orders"
+            "pointwise two-sided 95% Student-t confidence interval for the "
+            "mean across paired shuffled online orders"
         )
         for metric in AGGREGATE_METRICS:
             values = [row.get(metric) for row in group]
@@ -1188,8 +1302,8 @@ def _select_pointwise_multipliers(
                 ),
                 "selection_evaluation_reuse": True,
                 "selection_interpretation": (
-                    "exploratory pointwise oracle envelope; optimistically selected "
-                    "and evaluated on the same orders"
+                    "exploratory pointwise selection envelope; optimistically "
+                    "selected and evaluated on the same orders"
                 ),
             }
         )
@@ -1209,13 +1323,7 @@ def _selected_order_rows(
     selected: list[dict[str, Any]] = []
     for row in candidate_rows:
         key = (str(row["policy"]), float(row["l01"]), float(row["l11"]))
-        if row["policy"] in FIXED_POLICIES:
-            copied = dict(row)
-            copied["selected_multiplier"] = None
-            copied["selection_evaluation_reuse"] = False
-            copied["selection_rule"] = "fixed comparator; no multiplier selection"
-            selected.append(copied)
-        elif key in lookup and float(row["multiplier"]) == lookup[key]:
+        if key in lookup and float(row["multiplier"]) == lookup[key]:
             copied = dict(row)
             copied["selected_multiplier"] = float(row["multiplier"])
             copied["selection_evaluation_reuse"] = True
@@ -1228,25 +1336,27 @@ def _expected_random_rows(
 ) -> list[dict[str, Any]]:
     disagreement_count = int(np.count_nonzero(outcomes))
     rows: list[dict[str, Any]] = []
-    for etc in selected_order_rows:
-        if etc["policy"] != POLICY_ETC:
+    for igw_tree in selected_order_rows:
+        if igw_tree["policy"] != POLICY_IGW_TREE:
             continue
-        n = int(etc["examples"])
-        rate = float(etc["routing_rate"])
+        n = int(igw_tree["examples"])
+        rate = float(igw_tree["routing_rate"])
         accuracy = 1.0 - (1.0 - rate) * disagreement_count / n
         row = {
             "policy": "Random",
-            "method": "Random (expected, matched to selected ETC HGB)",
-            "l01": float(etc["l01"]),
-            "l11": float(etc["l11"]),
-            "alpha": float(etc["alpha"]),
+            "method": METHOD_LABELS["random"],
+            "l01": float(igw_tree["l01"]),
+            "l11": float(igw_tree["l11"]),
+            "alpha": float(igw_tree["alpha"]),
             "multiplier": None,
             "selected_multiplier": None,
-            "parameter_name": "matched_ETC_routing_rate",
+            "parameter_name": (
+                "matched_squarecb_pmside_tree_routing_rate"
+            ),
             "base_parameter": None,
             "effective_parameter": rate,
-            "order_run": int(etc["order_run"]),
-            "order_seed": int(etc["order_seed"]),
+            "order_run": int(igw_tree["order_run"]),
+            "order_seed": int(igw_tree["order_seed"]),
             "policy_seed": None,
             "order_was_shuffled": True,
             "examples": n,
@@ -1254,10 +1364,17 @@ def _expected_random_rows(
             "accuracy": float(accuracy),
             "model_updates": 0,
             "last_model_training_count": 0,
-            "random_baseline": "analytic expectation conditional on ETC traffic",
-            "matched_etc_policy": POLICY_ETC,
-            "matched_etc_probability_estimator": etc["probability_estimator"],
-            "matched_etc_multiplier": float(etc["selected_multiplier"]),
+            "random_baseline": (
+                "analytic expectation conditional on selected "
+                "SquareCB.PMSide tree traffic"
+            ),
+            "matched_squarecb_pmside_policy": POLICY_IGW_TREE,
+            "matched_squarecb_pmside_probability_estimator": igw_tree[
+                "probability_estimator"
+            ],
+            "matched_squarecb_pmside_multiplier": float(
+                igw_tree["selected_multiplier"]
+            ),
             "selection_evaluation_reuse": True,
         }
         row.update(
@@ -1291,7 +1408,8 @@ def _aggregate_selected(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result = {
             name: value
             for name, value in first.items()
-            if name
+            if name not in INTERNAL_ACTION_FIELDS
+            and name
             not in {
                 *AGGREGATE_METRICS,
                 "order_run",
@@ -1303,7 +1421,8 @@ def _aggregate_selected(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result["online_order_repeats"] = len(group)
         result["order_seeds"] = [int(row["order_seed"]) for row in group]
         result["error_bar_definition"] = (
-            "sample standard deviation across paired shuffled online orders"
+            "pointwise two-sided 95% Student-t confidence interval for the "
+            "mean across paired shuffled online orders"
         )
         for metric in AGGREGATE_METRICS:
             values = [row.get(metric) for row in group]
@@ -1336,14 +1455,20 @@ def _igw_difference_row(
     *,
     comparison_scope: str,
 ) -> dict[str, Any]:
-    """Return one paired order-level IGW estimator difference."""
+    """Return one paired order-level SquareCB.PMSide estimator difference."""
     if tree["order_seed"] != linear["order_seed"]:
-        raise RuntimeError("Paired IGW rows have different online orders")
+        raise RuntimeError(
+            "Paired SquareCB.PMSide rows have different online orders"
+        )
     if int(tree["examples"]) != int(linear["examples"]):
-        raise RuntimeError("Paired IGW rows have different online horizons")
+        raise RuntimeError(
+            "Paired SquareCB.PMSide rows have different online horizons"
+        )
     for name in ("l01", "l11"):
         if not np.isclose(float(tree[name]), float(linear[name])):
-            raise RuntimeError(f"Paired IGW rows have different {name} values")
+            raise RuntimeError(
+                f"Paired SquareCB.PMSide rows have different {name} values"
+            )
 
     tree_cost = float(tree["realized_total_cost"])
     linear_cost = float(linear["realized_total_cost"])
@@ -1386,7 +1511,7 @@ def _igw_difference_row(
         - float(linear["accuracy"]),
         "nonlinear_tree_routing_rate_change": float(tree["routing_rate"])
         - float(linear["routing_rate"]),
-        "positive_cost_reduction_favors": "IGW Tree",
+        "positive_cost_reduction_favors": "SquareCB.PMSide tree",
         "selection_evaluation_reuse": bool(
             tree.get("selection_evaluation_reuse", False)
             or linear.get("selection_evaluation_reuse", False)
@@ -1397,7 +1522,7 @@ def _igw_difference_row(
 def _igw_comparison_by_order(
     selected_order_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Pair separately tuned IGW variants on each shared online order."""
+    """Pair separately tuned SquareCB.PMSide variants on each order."""
     rows_by_policy = {
         policy: {
             (float(row["l01"]), int(row["order_run"])): row
@@ -1410,7 +1535,8 @@ def _igw_comparison_by_order(
     linear_rows = rows_by_policy[POLICY_IGW_LINEAR]
     if tree_rows.keys() != linear_rows.keys():
         raise RuntimeError(
-            "Selected IGW Tree and IGW Linear rows are not paired by loss/order"
+            "Selected SquareCB.PMSide tree and linear rows are not paired "
+            "by loss/order"
         )
 
     paired: list[dict[str, Any]] = []
@@ -1430,7 +1556,7 @@ def _igw_comparison_by_order(
 def _igw_matched_comparison_by_order(
     candidate_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Pair tree and linear IGW candidates at the same gamma multiplier."""
+    """Pair tree and linear SquareCB.PMSide at the same gamma multiplier."""
     rows_by_policy = {
         policy: {
             (
@@ -1447,7 +1573,7 @@ def _igw_matched_comparison_by_order(
     linear_rows = rows_by_policy[POLICY_IGW_LINEAR]
     if tree_rows.keys() != linear_rows.keys():
         raise RuntimeError(
-            "IGW Tree and IGW Linear candidates are not paired by "
+            "SquareCB.PMSide tree and linear candidates are not paired by "
             "loss/multiplier/order"
         )
 
@@ -1459,7 +1585,9 @@ def _igw_matched_comparison_by_order(
             comparison_scope="matched_gamma_estimator_contrast",
         )
         if not row["same_effective_gamma"]:
-            raise RuntimeError("Matched IGW candidates have different gamma values")
+            raise RuntimeError(
+                "Matched SquareCB.PMSide candidates have different gamma values"
+            )
         paired.append(row)
     return paired
 
@@ -1502,7 +1630,8 @@ def _aggregate_igw_comparison(
         result["online_order_repeats"] = len(group)
         result["order_seeds"] = [int(row["order_seed"]) for row in group]
         result["error_bar_definition"] = (
-            "sample standard deviation of paired order-level differences"
+            "pointwise two-sided 95% Student-t confidence interval for the "
+            "mean paired order-level difference"
         )
         reductions = np.asarray(
             [row["nonlinear_tree_cost_reduction"] for row in group],
@@ -1529,15 +1658,731 @@ def _aggregate_igw_comparison(
     return aggregated
 
 
+def _cross_fitted_hgb_reference(
+    contexts: np.ndarray,
+    outcomes: np.ndarray,
+    *,
+    folds: int,
+    seed: int,
+) -> dict[str, Any]:
+    """Return row-aligned probabilities from a fixed OOF HGB-15 reference."""
+    from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
+    from sklearn.model_selection import StratifiedKFold
+
+    X = np.asarray(contexts, dtype=np.float64)
+    y = np.asarray(outcomes, dtype=np.int8)
+    if X.ndim != 2 or y.ndim != 1 or X.shape[0] != y.size:
+        raise RuntimeError("Reference contexts and outcomes have invalid shapes")
+    if not np.all(np.isfinite(X)):
+        raise RuntimeError("Reference contexts must be finite")
+    if np.any((y != 0) & (y != 1)):
+        raise RuntimeError("Reference outcomes must be binary")
+    class_counts = np.bincount(y, minlength=2)
+    if folds < 2 or np.any(class_counts < folds):
+        raise RuntimeError(
+            "The cross-fitted reference requires at least one example from "
+            "each class in every fold"
+        )
+
+    splitter = StratifiedKFold(
+        n_splits=folds,
+        shuffle=True,
+        random_state=seed,
+    )
+    probabilities = np.full(y.size, np.nan, dtype=np.float64)
+    fold_index = np.full(y.size, -1, dtype=np.int16)
+    for fold, (train_index, held_out_index) in enumerate(splitter.split(X, y)):
+        backend = make_tree_backend({"kind": "hgb"}, seed=seed)
+        backend.fit_all(X[train_index], y[train_index])
+        probabilities[held_out_index] = backend.predict_proba(
+            X[held_out_index]
+        )
+        fold_index[held_out_index] = fold
+
+    if np.any(fold_index < 0) or not np.all(np.isfinite(probabilities)):
+        raise RuntimeError("Cross-fitted reference did not predict every row")
+    probabilities = np.clip(probabilities, 0.0, 1.0)
+    clipped = np.clip(probabilities, 1e-12, 1.0 - 1e-12)
+    return {
+        "probability": probabilities,
+        "fold_index": fold_index,
+        "folds": int(folds),
+        "seed": int(seed),
+        "method": f"{folds}-fold cross-fitted HGB leaves=15 reference",
+        "roc_auc": float(roc_auc_score(y, probabilities)),
+        "log_loss": float(log_loss(y, clipped, labels=[0, 1])),
+        "brier_score": float(brier_score_loss(y, probabilities)),
+    }
+
+
+def _reference_policy_rows(
+    reference: dict[str, Any],
+    outcomes: np.ndarray,
+    l01_values: Sequence[float],
+    l11: float,
+) -> list[dict[str, Any]]:
+    """Summarize the fixed cross-fitted reference at every loss threshold."""
+    probabilities = np.asarray(reference["probability"], dtype=np.float64)
+    outcomes = np.asarray(outcomes, dtype=np.int8)
+    rows: list[dict[str, Any]] = []
+    for l01 in l01_values:
+        alpha = 1.0 / (1.0 + float(l01) - l11)
+        actions = probabilities >= alpha
+        routing_rate = float(np.mean(actions))
+        accuracy = float(np.mean(actions | (outcomes == 0)))
+        row = {
+            "method": reference["method"],
+            "l01": float(l01),
+            "l11": float(l11),
+            "alpha": float(alpha),
+            "examples": int(outcomes.size),
+            "routing_rate": routing_rate,
+            "accuracy": accuracy,
+            "reference_folds": int(reference["folds"]),
+            "reference_seed": int(reference["seed"]),
+            "reference_probability_tie_rule": "route strong when p_hat >= alpha",
+            "reference_each_row_held_out": True,
+        }
+        row.update(
+            _realized_cost_metrics(
+                l01=float(l01),
+                l11=float(l11),
+                routing_rate=routing_rate,
+                accuracy=accuracy,
+                examples=outcomes.size,
+            )
+        )
+        rows.append(row)
+    return rows
+
+
+def _write_reference_predictions_npz(
+    path: Path,
+    reference: dict[str, Any],
+    outcomes: np.ndarray,
+    example_ids: Sequence[str],
+) -> None:
+    """Persist the fixed row-aligned reference needed to audit the comparator."""
+    temporary = path.with_name(path.name + ".tmp.npz")
+    np.savez_compressed(
+        temporary,
+        schema_version=np.asarray(1, dtype=np.int16),
+        example_id=np.asarray(example_ids, dtype=np.str_),
+        outcome=np.asarray(outcomes, dtype=np.int8),
+        fold_index=np.asarray(reference["fold_index"], dtype=np.int16),
+        oof_disagreement_probability=np.asarray(
+            reference["probability"], dtype=np.float64
+        ),
+        folds=np.asarray(reference["folds"], dtype=np.int16),
+        seed=np.asarray(reference["seed"], dtype=np.int64),
+        method=np.asarray(reference["method"]),
+        hgb_profile=np.asarray(json.dumps(ONLINE_HGB_PROFILE, sort_keys=True)),
+        outcome_source=np.asarray("cached_weak_strong_disagreement"),
+        each_row_held_out=np.asarray(True),
+    )
+    temporary.replace(path)
+
+
+def _build_selected_learning_curves(
+    selected_order_rows: list[dict[str, Any]],
+    outcomes: np.ndarray,
+    permutations: np.ndarray,
+    reference_probabilities: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Reconstruct selected curves against a fixed cross-fitted reference."""
+    outcomes = np.asarray(outcomes, dtype=np.int8)
+    permutations = np.asarray(permutations)
+    reference_probabilities = np.asarray(
+        reference_probabilities, dtype=np.float64
+    )
+    if permutations.ndim != 2 or permutations.shape[1] != outcomes.size:
+        raise RuntimeError("Learning-curve permutations have an invalid shape")
+    if np.any((outcomes != 0) & (outcomes != 1)):
+        raise RuntimeError("Learning curves require binary disagreement outcomes")
+    if (
+        reference_probabilities.ndim != 1
+        or reference_probabilities.size != outcomes.size
+        or not np.all(np.isfinite(reference_probabilities))
+        or np.any(
+            (reference_probabilities < 0.0)
+            | (reference_probabilities > 1.0)
+        )
+    ):
+        raise RuntimeError("Reference probabilities are invalid or misaligned")
+
+    sources: list[tuple[dict[str, Any], bool]] = [
+        (row, False) for row in selected_order_rows
+    ]
+    sources.extend(
+        (row, True)
+        for row in selected_order_rows
+        if row["policy"] == POLICY_IGW_TREE
+    )
+    sources.sort(
+        key=lambda item: (
+            POLICY_OUTPUT_RANK.get(
+                "Random" if item[1] else str(item[0]["policy"]),
+                len(POLICY_OUTPUT_RANK),
+            ),
+            float(item[0]["l01"]),
+            int(item[0]["order_run"]),
+        )
+    )
+
+    trajectory_count = len(sources)
+    horizon = outcomes.size
+    cumulative_cost = np.empty((trajectory_count, horizon), dtype=np.float32)
+    cumulative_reference_cost = np.empty(
+        (trajectory_count, horizon), dtype=np.float32
+    )
+    cumulative_reference_regret = np.empty_like(cumulative_reference_cost)
+    average_reference_regret = np.empty_like(cumulative_reference_cost)
+    cumulative_clairvoyant_excess_cost = np.empty_like(
+        cumulative_reference_cost
+    )
+    policies: list[str] = []
+    methods: list[str] = []
+    trajectory_kinds: list[str] = []
+    l01_values = np.empty(trajectory_count, dtype=np.float64)
+    l11_values = np.empty(trajectory_count, dtype=np.float64)
+    order_runs = np.empty(trajectory_count, dtype=np.int32)
+    order_seeds = np.empty(trajectory_count, dtype=np.int64)
+    selected_multipliers = np.full(trajectory_count, np.nan, dtype=np.float64)
+    effective_parameters = np.full(trajectory_count, np.nan, dtype=np.float64)
+    matched_routing_rates = np.full(trajectory_count, np.nan, dtype=np.float64)
+
+    for index, (source, is_random) in enumerate(sources):
+        l01 = float(source["l01"])
+        l11 = float(source["l11"])
+        if l11 != 1.0 or l01 < 1.0:
+            raise RuntimeError(
+                "Learning-curve study requires l11=1 and l01>=1"
+            )
+        order_index = int(source["order_run"]) - 1
+        if not 0 <= order_index < permutations.shape[0]:
+            raise RuntimeError("Learning-curve order index is out of range")
+        y_ordered = outcomes[permutations[order_index]].astype(
+            np.float64, copy=False
+        )
+        reference_probability_ordered = reference_probabilities[
+            permutations[order_index]
+        ]
+        reference_threshold = 1.0 / (1.0 + l01 - l11)
+        reference_actions = reference_probability_ordered >= reference_threshold
+        reference_action_values = reference_actions.astype(
+            np.float64, copy=False
+        )
+        reference_increments = reference_action_values + (
+            (1.0 - reference_action_values) * l01 * y_ordered
+        )
+
+        if is_random:
+            policy = "Random"
+            method = METHOD_LABELS["random"]
+            trajectory_kind = "analytic_expected"
+            routing_rate = float(source["routing_rate"])
+            increments = (
+                routing_rate + (1.0 - routing_rate) * l01 * y_ordered
+            )
+            effective_parameters[index] = routing_rate
+            matched_routing_rates[index] = routing_rate
+        else:
+            policy = str(source["policy"])
+            method = str(source["method"])
+            trajectory_kind = "realized"
+            actions = _decode_action_payload(source)
+            if actions.size != horizon:
+                raise RuntimeError(
+                    "Selected action trajectory differs from the online horizon"
+                )
+            action_values = actions.astype(np.float64, copy=False)
+            increments = action_values + (
+                (1.0 - action_values) * l01 * y_ordered
+            )
+            selected = source.get("selected_multiplier")
+            if selected is not None:
+                selected_multipliers[index] = float(selected)
+            effective = source.get("effective_parameter")
+            if effective is not None:
+                effective_parameters[index] = float(effective)
+
+        cost_curve = np.cumsum(increments, dtype=np.float64)
+        reference_cost_curve = np.cumsum(
+            reference_increments, dtype=np.float64
+        )
+        reference_regret_curve = np.cumsum(
+            increments - reference_increments, dtype=np.float64
+        )
+        average_regret_curve = reference_regret_curve / np.arange(
+            1, horizon + 1, dtype=np.float64
+        )
+        clairvoyant_excess_curve = np.cumsum(
+            increments - y_ordered, dtype=np.float64
+        )
+        if not is_random and horizon and not np.isclose(
+            cost_curve[-1],
+            float(source["realized_total_cost"]),
+            rtol=1e-10,
+            atol=1e-8,
+        ):
+            raise RuntimeError(
+                "Decoded actions do not reproduce selected realized total cost"
+            )
+        if horizon and not np.isclose(
+            reference_regret_curve[-1],
+            cost_curve[-1] - reference_cost_curve[-1],
+            rtol=1e-12,
+            atol=1e-8,
+        ):
+            raise RuntimeError("Reference-regret terminal identity failed")
+
+        cumulative_cost[index] = cost_curve.astype(np.float32)
+        cumulative_reference_cost[index] = reference_cost_curve.astype(
+            np.float32
+        )
+        cumulative_reference_regret[index] = reference_regret_curve.astype(
+            np.float32
+        )
+        average_reference_regret[index] = average_regret_curve.astype(
+            np.float32
+        )
+        cumulative_clairvoyant_excess_cost[index] = (
+            clairvoyant_excess_curve.astype(np.float32)
+        )
+        policies.append(policy)
+        methods.append(method)
+        trajectory_kinds.append(trajectory_kind)
+        l01_values[index] = l01
+        l11_values[index] = l11
+        order_runs[index] = int(source["order_run"])
+        order_seeds[index] = int(source["order_seed"])
+
+    return {
+        "round": np.arange(1, horizon + 1, dtype=np.int32),
+        "policy": np.asarray(policies, dtype=np.str_),
+        "method": np.asarray(methods, dtype=np.str_),
+        "trajectory_kind": np.asarray(trajectory_kinds, dtype=np.str_),
+        "l01": l01_values,
+        "l11": l11_values,
+        "order_run": order_runs,
+        "order_seed": order_seeds,
+        "selected_multiplier": selected_multipliers,
+        "effective_parameter": effective_parameters,
+        "matched_routing_rate": matched_routing_rates,
+        "cumulative_cost": cumulative_cost,
+        "cumulative_reference_cost": cumulative_reference_cost,
+        "cumulative_reference_regret": cumulative_reference_regret,
+        "average_reference_regret": average_reference_regret,
+        "cumulative_clairvoyant_excess_cost": (
+            cumulative_clairvoyant_excess_cost
+        ),
+    }
+
+
+def _write_learning_curves_npz(
+    path: Path, curves: dict[str, np.ndarray]
+) -> None:
+    temporary = path.with_name(path.name + ".tmp.npz")
+    np.savez_compressed(
+        temporary,
+        schema_version=np.asarray(2, dtype=np.int16),
+        storage_dtype=np.asarray("float32"),
+        cost_increment_definition=np.asarray(
+            REALIZED_COST_INCREMENT_DEFINITION
+        ),
+        clairvoyant_cost_increment_definition=np.asarray(
+            CLAIRVOYANT_COST_INCREMENT_DEFINITION
+        ),
+        regret_increment_definition=np.asarray(
+            REGRET_INCREMENT_DEFINITION
+        ),
+        clairvoyant_excess_increment_definition=np.asarray(
+            CLAIRVOYANT_EXCESS_INCREMENT_DEFINITION
+        ),
+        random_increment_definition=np.asarray(
+            RANDOM_COST_INCREMENT_DEFINITION
+        ),
+        selection_warning=np.asarray(LEARNING_CURVE_SELECTION_WARNING),
+        **curves,
+    )
+    temporary.replace(path)
+
+
+def _aggregate_learning_curves(
+    curves: dict[str, np.ndarray],
+) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str, float, float], list[int]] = {}
+    for index, (policy, method, l01, l11) in enumerate(
+        zip(
+            curves["policy"],
+            curves["method"],
+            curves["l01"],
+            curves["l11"],
+        )
+    ):
+        key = (str(policy), str(method), float(l01), float(l11))
+        groups.setdefault(key, []).append(index)
+
+    aggregated: list[dict[str, Any]] = []
+    for key in sorted(
+        groups,
+        key=lambda item: (
+            POLICY_OUTPUT_RANK.get(item[0], len(POLICY_OUTPUT_RANK)),
+            item[2],
+        ),
+        ):
+        indices = np.asarray(groups[key], dtype=np.int64)
+        repeats = indices.size
+        confidence_df = int(repeats - 1)
+        confidence_t_critical = (
+            student_t_critical_value(
+                int(repeats),
+                confidence_level=PLOT_CONFIDENCE_LEVEL,
+            )
+            if repeats > 1
+            else math.nan
+        )
+        curve_names = (
+            "cumulative_cost",
+            "cumulative_reference_cost",
+            "cumulative_reference_regret",
+            "average_reference_regret",
+            "cumulative_clairvoyant_excess_cost",
+        )
+        curve_statistics: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for name in curve_names:
+            values = curves[name][indices]
+            standard_deviation = (
+                np.std(values, axis=0, ddof=1, dtype=np.float64)
+                if repeats > 1
+                else np.zeros(values.shape[1], dtype=np.float64)
+            )
+            curve_statistics[name] = (
+                np.mean(values, axis=0, dtype=np.float64),
+                standard_deviation,
+            )
+        effective = curves["effective_parameter"][indices]
+        matched = curves["matched_routing_rate"][indices]
+        selected = curves["selected_multiplier"][indices]
+        trajectory_kinds = np.unique(curves["trajectory_kind"][indices])
+        if trajectory_kinds.size != 1:
+            raise RuntimeError(
+                "A learning-curve group mixes realized and expected trajectories"
+            )
+        finite_selected = selected[np.isfinite(selected)]
+        if finite_selected.size and not np.allclose(
+            finite_selected, finite_selected[0]
+        ):
+            raise RuntimeError(
+                "Selected multiplier differs across paired learning curves"
+            )
+
+        def finite_mean_std(values: np.ndarray) -> tuple[float, float]:
+            finite = values[np.isfinite(values)]
+            if not finite.size:
+                return math.nan, math.nan
+            mean = float(np.mean(finite))
+            std = float(np.std(finite, ddof=1)) if finite.size > 1 else 0.0
+            return mean, std
+
+        effective_mean, effective_std = finite_mean_std(effective)
+        matched_mean, matched_std = finite_mean_std(matched)
+        result = {
+                "policy": key[0],
+                "method": key[1],
+                "trajectory_kind": str(trajectory_kinds[0]),
+                "l01": key[2],
+                "l11": key[3],
+                "online_order_repeats": int(repeats),
+                "confidence_level": PLOT_CONFIDENCE_LEVEL,
+                "confidence_df": confidence_df,
+                "confidence_t_critical": confidence_t_critical,
+                "selected_multiplier": (
+                    float(finite_selected[0])
+                    if finite_selected.size
+                    else math.nan
+                ),
+                "effective_parameter_mean": effective_mean,
+                "effective_parameter_std": effective_std,
+                "matched_routing_rate_mean": matched_mean,
+                "matched_routing_rate_std": matched_std,
+                "round": curves["round"],
+            }
+        for name, (mean, standard_deviation) in curve_statistics.items():
+            sem = standard_deviation / np.sqrt(repeats)
+            result[f"{name}_mean"] = mean
+            result[f"{name}_std"] = standard_deviation
+            result[f"{name}_sem"] = sem
+            if name in {
+                "cumulative_reference_regret",
+                "average_reference_regret",
+            }:
+                margin = confidence_t_critical * sem
+                result[f"{name}_ci95_lower"] = mean - margin
+                result[f"{name}_ci95_upper"] = mean + margin
+        aggregated.append(result)
+    return aggregated
+
+
+def _write_learning_curve_aggregate_csv(
+    path: Path, aggregated: list[dict[str, Any]]
+) -> None:
+    fieldnames = [
+        "policy",
+        "method",
+        "trajectory_kind",
+        "l01",
+        "l11",
+        "round",
+        "online_order_repeats",
+        "confidence_level",
+        "confidence_df",
+        "confidence_t_critical",
+        "selected_multiplier",
+        "effective_parameter_mean",
+        "effective_parameter_std",
+        "matched_routing_rate_mean",
+        "matched_routing_rate_std",
+        "cumulative_cost_mean",
+        "cumulative_cost_std",
+        "cumulative_cost_sem",
+        "cumulative_reference_cost_mean",
+        "cumulative_reference_cost_std",
+        "cumulative_reference_cost_sem",
+        "cumulative_reference_regret_mean",
+        "cumulative_reference_regret_std",
+        "cumulative_reference_regret_sem",
+        "cumulative_reference_regret_ci95_lower",
+        "cumulative_reference_regret_ci95_upper",
+        "average_reference_regret_mean",
+        "average_reference_regret_std",
+        "average_reference_regret_sem",
+        "average_reference_regret_ci95_lower",
+        "average_reference_regret_ci95_upper",
+        "cumulative_clairvoyant_excess_cost_mean",
+        "cumulative_clairvoyant_excess_cost_std",
+        "cumulative_clairvoyant_excess_cost_sem",
+    ]
+
+    def csv_scalar(value: Any) -> Any:
+        if isinstance(value, (float, np.floating)) and not math.isfinite(
+            float(value)
+        ):
+            return ""
+        return value
+
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        for group in aggregated:
+            scalar = {
+                name: csv_scalar(group[name])
+                for name in fieldnames
+                if name
+                not in {
+                    "round",
+                    "cumulative_cost_mean",
+                    "cumulative_cost_std",
+                    "cumulative_cost_sem",
+                    "cumulative_reference_cost_mean",
+                    "cumulative_reference_cost_std",
+                    "cumulative_reference_cost_sem",
+                    "cumulative_reference_regret_mean",
+                    "cumulative_reference_regret_std",
+                    "cumulative_reference_regret_sem",
+                    "cumulative_reference_regret_ci95_lower",
+                    "cumulative_reference_regret_ci95_upper",
+                    "average_reference_regret_mean",
+                    "average_reference_regret_std",
+                    "average_reference_regret_sem",
+                    "average_reference_regret_ci95_lower",
+                    "average_reference_regret_ci95_upper",
+                    "cumulative_clairvoyant_excess_cost_mean",
+                    "cumulative_clairvoyant_excess_cost_std",
+                    "cumulative_clairvoyant_excess_cost_sem",
+                }
+            }
+            for round_index in range(len(group["round"])):
+                writer.writerow(
+                    scalar
+                    | {
+                        "round": int(group["round"][round_index]),
+                        "cumulative_cost_mean": float(
+                            group["cumulative_cost_mean"][round_index]
+                        ),
+                        "cumulative_cost_std": float(
+                            group["cumulative_cost_std"][round_index]
+                        ),
+                        "cumulative_cost_sem": float(
+                            group["cumulative_cost_sem"][round_index]
+                        ),
+                        "cumulative_reference_cost_mean": float(
+                            group["cumulative_reference_cost_mean"][round_index]
+                        ),
+                        "cumulative_reference_cost_std": float(
+                            group["cumulative_reference_cost_std"][round_index]
+                        ),
+                        "cumulative_reference_cost_sem": float(
+                            group["cumulative_reference_cost_sem"][round_index]
+                        ),
+                        "cumulative_reference_regret_mean": float(
+                            group["cumulative_reference_regret_mean"][round_index]
+                        ),
+                        "cumulative_reference_regret_std": float(
+                            group["cumulative_reference_regret_std"][round_index]
+                        ),
+                        "cumulative_reference_regret_sem": float(
+                            group["cumulative_reference_regret_sem"][round_index]
+                        ),
+                        "cumulative_reference_regret_ci95_lower": float(
+                            group[
+                                "cumulative_reference_regret_ci95_lower"
+                            ][round_index]
+                        ),
+                        "cumulative_reference_regret_ci95_upper": float(
+                            group[
+                                "cumulative_reference_regret_ci95_upper"
+                            ][round_index]
+                        ),
+                        "average_reference_regret_mean": float(
+                            group["average_reference_regret_mean"][round_index]
+                        ),
+                        "average_reference_regret_std": float(
+                            group["average_reference_regret_std"][round_index]
+                        ),
+                        "average_reference_regret_sem": float(
+                            group["average_reference_regret_sem"][round_index]
+                        ),
+                        "average_reference_regret_ci95_lower": float(
+                            group[
+                                "average_reference_regret_ci95_lower"
+                            ][round_index]
+                        ),
+                        "average_reference_regret_ci95_upper": float(
+                            group[
+                                "average_reference_regret_ci95_upper"
+                            ][round_index]
+                        ),
+                        "cumulative_clairvoyant_excess_cost_mean": float(
+                            group[
+                                "cumulative_clairvoyant_excess_cost_mean"
+                            ][round_index]
+                        ),
+                        "cumulative_clairvoyant_excess_cost_std": float(
+                            group[
+                                "cumulative_clairvoyant_excess_cost_std"
+                            ][round_index]
+                        ),
+                        "cumulative_clairvoyant_excess_cost_sem": float(
+                            group[
+                                "cumulative_clairvoyant_excess_cost_sem"
+                            ][round_index]
+                        ),
+                    }
+                )
+    temporary.replace(path)
+
+
+def _plot_selected_cumulative_reference_regret(
+    output: Path, aggregated: list[dict[str, Any]]
+) -> list[Path]:
+    plt = publication_pyplot()
+
+    for prefix in (
+        LEGACY_LEARNING_CURVE_PLOT_PREFIX,
+        REVISION7_REGRET_PLOT_PREFIX,
+    ):
+        for suffix in ("png", "pdf"):
+            for legacy_path in output.glob(f"{prefix}*.{suffix}"):
+                legacy_path.unlink()
+
+    paths: list[Path] = []
+    for l01 in sorted({float(group["l01"]) for group in aggregated}):
+        figure, axis = plt.subplots(
+            figsize=PUBLICATION_FIGSIZE,
+            constrained_layout=True,
+        )
+        for group in (
+            item for item in aggregated if float(item["l01"]) == l01
+        ):
+            rounds = group["round"]
+            mean = group["cumulative_reference_regret_mean"]
+            lower = group["cumulative_reference_regret_ci95_lower"]
+            upper = group["cumulative_reference_regret_ci95_upper"]
+            (line,) = axis.plot(rounds, mean, label=group["method"])
+            axis.fill_between(
+                rounds,
+                lower,
+                upper,
+                color=line.get_color(),
+                alpha=0.15,
+                linewidth=0,
+            )
+        axis.set_xlabel(AXIS_LABELS["round"])
+        axis.set_ylabel(AXIS_LABELS["cumulative_reference_regret"])
+        axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.6)
+        axis.grid(alpha=0.25)
+        axis.legend()
+        path = output / (
+            f"{LEARNING_CURVE_PLOT_PREFIX}{_float_slug(l01)}.png"
+        )
+        save_publication_figure(figure, path)
+        plt.close(figure)
+        paths.append(path)
+    return paths
+
+
+def _plot_selected_average_reference_regret(
+    output: Path, aggregated: list[dict[str, Any]]
+) -> list[Path]:
+    plt = publication_pyplot()
+
+    paths: list[Path] = []
+    for l01 in sorted({float(group["l01"]) for group in aggregated}):
+        figure, axis = plt.subplots(
+            figsize=PUBLICATION_FIGSIZE,
+            constrained_layout=True,
+        )
+        for group in (
+            item for item in aggregated if float(item["l01"]) == l01
+        ):
+            rounds = group["round"]
+            mean = group["average_reference_regret_mean"]
+            lower = group["average_reference_regret_ci95_lower"]
+            upper = group["average_reference_regret_ci95_upper"]
+            (line,) = axis.plot(rounds, mean, label=group["method"])
+            axis.fill_between(
+                rounds,
+                lower,
+                upper,
+                color=line.get_color(),
+                alpha=0.15,
+                linewidth=0,
+            )
+        axis.set_xlabel(AXIS_LABELS["round"])
+        axis.set_ylabel(AXIS_LABELS["average_reference_regret"])
+        axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.6)
+        axis.grid(alpha=0.25)
+        axis.legend()
+        path = output / (
+            f"{AVERAGE_REGRET_PLOT_PREFIX}{_float_slug(l01)}.png"
+        )
+        save_publication_figure(figure, path)
+        plt.close(figure)
+        paths.append(path)
+    return paths
+
+
 def _plot_selected_routing_accuracy(
     path: Path, rows: list[dict[str, Any]]
 ) -> None:
-    import matplotlib
+    plt = publication_pyplot()
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    figure, axis = plt.subplots(figsize=(9, 6), constrained_layout=True)
+    figure, axis = plt.subplots(
+        figsize=PUBLICATION_FIGSIZE,
+        constrained_layout=True,
+    )
     for method in dict.fromkeys(str(row["method"]) for row in rows):
         selected = sorted(
             (row for row in rows if row["method"] == method),
@@ -1546,39 +2391,41 @@ def _plot_selected_routing_accuracy(
         axis.errorbar(
             [row["routing_rate_mean"] for row in selected],
             [row["accuracy_mean"] for row in selected],
-            xerr=[row["routing_rate_std"] for row in selected],
-            yerr=[row["accuracy_std"] for row in selected],
+            xerr=[
+                student_t_half_width(
+                    row["routing_rate_std"],
+                    int(row["online_order_repeats"]),
+                )
+                for row in selected
+            ],
+            yerr=[
+                student_t_half_width(
+                    row["accuracy_std"],
+                    int(row["online_order_repeats"]),
+                )
+                for row in selected
+            ],
             fmt="-o",
             capsize=3,
             label=method,
-        )
+    )
     axis.set_xlim(0.0, 1.0)
     axis.set_ylim(0.0, 1.0)
-    axis.set_xlabel("Strong-model routing rate")
-    axis.set_ylabel("Agreement with cached strong-model reference")
-    repeats = int(rows[0]["online_order_repeats"])
-    includes_pgts = any(row["policy"] == POLICY_PGTS for row in rows)
-    title = (
-        "Selected and fixed routing policies: routing rate versus accuracy"
-        if includes_pgts
-        else "Pointwise multiplier-selected routing rate versus accuracy"
-    )
-    axis.set_title(
-        f"{title}\nMean +/- 1 SD across {repeats} paired shuffled orders"
-    )
+    axis.set_xlabel(AXIS_LABELS["routing_rate"])
+    axis.set_ylabel(AXIS_LABELS["accuracy"])
     axis.grid(alpha=0.25)
-    axis.legend(fontsize=8)
-    figure.savefig(path, dpi=180)
+    axis.legend()
+    save_publication_figure(figure, path)
     plt.close(figure)
 
 
 def _plot_selected_cost(path: Path, rows: list[dict[str, Any]]) -> None:
-    import matplotlib
+    plt = publication_pyplot()
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    figure, axis = plt.subplots(figsize=(9, 6), constrained_layout=True)
+    figure, axis = plt.subplots(
+        figsize=PUBLICATION_FIGSIZE,
+        constrained_layout=True,
+    )
     for method in dict.fromkeys(str(row["method"]) for row in rows):
         selected = sorted(
             (row for row in rows if row["method"] == method),
@@ -1587,71 +2434,47 @@ def _plot_selected_cost(path: Path, rows: list[dict[str, Any]]) -> None:
         axis.errorbar(
             [row["l01"] for row in selected],
             [row["realized_total_cost_mean"] for row in selected],
-            yerr=[row["realized_total_cost_std"] for row in selected],
+            yerr=[
+                student_t_half_width(
+                    row["realized_total_cost_std"],
+                    int(row["online_order_repeats"]),
+                )
+                for row in selected
+            ],
             fmt="-o",
             capsize=3,
             label=method,
-        )
+    )
     ticks = sorted({float(row["l01"]) for row in rows})
     axis.set_xticks(ticks, [f"{value:g}" for value in ticks])
-    axis.set_xlabel(r"Unrouted-disagreement cost $\ell_{01}$")
-    axis.set_ylabel(
-        f"Total cost over {int(rows[0]['examples']):,} online samples"
-    )
-    repeats = int(rows[0]["online_order_repeats"])
-    includes_pgts = any(row["policy"] == POLICY_PGTS for row in rows)
-    title = (
-        "Selected and fixed policies: total cost"
-        if includes_pgts
-        else "Pointwise multiplier-selected total cost"
-    )
-    axis.set_title(
-        f"{title} (learned policies realized; Random expected)\n"
-        f"Mean +/- 1 SD across {repeats} paired shuffled orders"
-    )
+    axis.set_xlabel(AXIS_LABELS["l01"])
+    axis.set_ylabel(AXIS_LABELS["total_cost"])
     axis.grid(alpha=0.25)
-    axis.legend(fontsize=8)
-    l11_values = {float(row["l11"]) for row in rows}
-    relation = (
-        r"$\alpha=1/\ell_{01}$ because $\ell_{11}=1$"
-        if l11_values == {1.0}
-        else r"$\alpha=1/(1+\ell_{01}-\ell_{11})$"
-    )
-    figure.text(
-        0.5,
-        0.005,
-        relation
-        + (
-            "; tuned-policy multiplier selection uses these same orders"
-            if includes_pgts
-            else "; exploratory oracle selection uses these same orders"
-        ),
-        ha="center",
-        fontsize=9,
-    )
-    figure.savefig(path, dpi=180)
+    axis.legend()
+    save_publication_figure(figure, path)
     plt.close(figure)
 
 
 def _plot_selected_multipliers(path: Path, selections: list[dict[str, Any]]) -> None:
-    import matplotlib
+    plt = publication_pyplot()
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    figure, axis = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    figure, axis = plt.subplots(
+        figsize=PUBLICATION_FIGSIZE_SHORT,
+        constrained_layout=True,
+    )
     labels = {
         POLICY_CBPSIDE: "CBPSide",
-        POLICY_ETC: "ETC HGB",
-        POLICY_ETC_LINEAR: "ETC Linear",
-        POLICY_IGW_LINEAR: "IGW Linear",
-        POLICY_IGW_TREE: "IGW Tree",
+        POLICY_IGW_LINEAR: "SquareCB.PMSide Linear",
+        POLICY_IGW_TREE: "SquareCB.PMSide Tree",
+        POLICY_PGTS: METHOD_LABELS["pgts"],
     }
     for policy in TUNED_POLICIES:
         selected = sorted(
             (row for row in selections if row["policy"] == policy),
             key=lambda row: float(row["l01"]),
         )
+        if not selected:
+            continue
         axis.plot(
             [row["l01"] for row in selected],
             [row["selected_multiplier"] for row in selected],
@@ -1661,29 +2484,34 @@ def _plot_selected_multipliers(path: Path, selections: list[dict[str, Any]]) -> 
     ticks = sorted({float(row["l01"]) for row in selections})
     axis.set_xticks(ticks, [f"{value:g}" for value in ticks])
     axis.set_yscale("log")
-    axis.set_xlabel(r"Unrouted-disagreement cost $\ell_{01}$")
-    axis.set_ylabel("Selected multiplier (log scale)")
-    axis.set_title("Pointwise multiplier selected by lowest mean total cost")
+    axis.set_xlabel(AXIS_LABELS["l01"])
+    axis.set_ylabel(AXIS_LABELS["selected_multiplier"])
     axis.grid(alpha=0.25)
     axis.legend()
-    figure.savefig(path, dpi=180)
+    save_publication_figure(figure, path)
     plt.close(figure)
 
 
 def _plot_igw_estimator_comparison(
     path: Path, rows: list[dict[str, Any]]
 ) -> None:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = publication_pyplot()
 
     selected = sorted(rows, key=lambda row: float(row["l01"]))
-    figure, axis = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    figure, axis = plt.subplots(
+        figsize=PUBLICATION_FIGSIZE_SHORT,
+        constrained_layout=True,
+    )
     axis.errorbar(
         [row["l01"] for row in selected],
         [row["nonlinear_tree_cost_reduction_mean"] for row in selected],
-        yerr=[row["nonlinear_tree_cost_reduction_std"] for row in selected],
+        yerr=[
+            student_t_half_width(
+                row["nonlinear_tree_cost_reduction_std"],
+                int(row["online_order_repeats"]),
+            )
+            for row in selected
+        ],
         fmt="-o",
         capsize=3,
         color="tab:purple",
@@ -1691,35 +2519,22 @@ def _plot_igw_estimator_comparison(
     axis.axhline(0.0, color="black", linewidth=1, linestyle="--")
     ticks = [float(row["l01"]) for row in selected]
     axis.set_xticks(ticks, [f"{value:g}" for value in ticks])
-    axis.set_xlabel(r"Unrouted-disagreement cost $\ell_{01}$")
-    axis.set_ylabel("Linear IGW cost - tree IGW cost\n(positive favors tree)")
-    repeats = int(selected[0]["online_order_repeats"])
-    axis.set_title(
-        "Exploratory separately tuned IGW comparison\n"
-        f"Mean +/- 1 SD across {repeats} shuffled orders"
-    )
+    axis.set_xlabel(AXIS_LABELS["l01"])
+    axis.set_ylabel(AXIS_LABELS["squarecb_cost_difference"])
     axis.grid(alpha=0.25)
-    figure.text(
-        0.5,
-        0.005,
-        "Each variant uses its separately selected gamma multiplier on these "
-        "same orders",
-        ha="center",
-        fontsize=9,
-    )
-    figure.savefig(path, dpi=180)
+    save_publication_figure(figure, path)
     plt.close(figure)
 
 
 def _plot_igw_matched_estimator_comparison(
     path: Path, rows: list[dict[str, Any]]
 ) -> None:
-    import matplotlib
+    plt = publication_pyplot()
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    figure, axis = plt.subplots(figsize=(9, 6), constrained_layout=True)
+    figure, axis = plt.subplots(
+        figsize=PUBLICATION_FIGSIZE,
+        constrained_layout=True,
+    )
     multipliers = sorted({float(row["tree_gamma_multiplier"]) for row in rows})
     for multiplier in multipliers:
         selected = sorted(
@@ -1733,7 +2548,13 @@ def _plot_igw_matched_estimator_comparison(
         axis.errorbar(
             [row["l01"] for row in selected],
             [row["nonlinear_tree_cost_reduction_mean"] for row in selected],
-            yerr=[row["nonlinear_tree_cost_reduction_std"] for row in selected],
+            yerr=[
+                student_t_half_width(
+                    row["nonlinear_tree_cost_reduction_std"],
+                    int(row["online_order_repeats"]),
+                )
+                for row in selected
+            ],
             fmt="-o",
             capsize=3,
             label=f"{multiplier:g}",
@@ -1741,24 +2562,11 @@ def _plot_igw_matched_estimator_comparison(
     axis.axhline(0.0, color="black", linewidth=1, linestyle="--")
     ticks = sorted({float(row["l01"]) for row in rows})
     axis.set_xticks(ticks, [f"{value:g}" for value in ticks])
-    axis.set_xlabel(r"Unrouted-disagreement cost $\ell_{01}$")
-    axis.set_ylabel("Linear IGW cost - tree IGW cost\n(positive favors tree)")
-    repeats = int(rows[0]["online_order_repeats"])
-    axis.set_title(
-        "Matched-gamma IGW estimator comparison\n"
-        f"Mean +/- 1 SD across {repeats} shuffled orders"
-    )
+    axis.set_xlabel(AXIS_LABELS["l01"])
+    axis.set_ylabel(AXIS_LABELS["squarecb_cost_difference"])
     axis.grid(alpha=0.25)
     axis.legend(title=r"Gamma multiplier")
-    figure.text(
-        0.5,
-        0.005,
-        "Within each line, both IGW variants use the same gamma and online "
-        "protocol; action-dependent histories may diverge",
-        ha="center",
-        fontsize=9,
-    )
-    figure.savefig(path, dpi=180)
+    save_publication_figure(figure, path)
     plt.close(figure)
 
 
@@ -1780,15 +2588,11 @@ def _manifest_and_fingerprint(
     context_summary: dict[str, Any],
 ) -> tuple[dict[str, Any], str]:
     n = contexts.shape[0]
+    active_tuned_policies = _active_tuned_policies(args)
     base_gamma = (
         float(args.igw_base_gamma)
         if args.igw_base_gamma is not None
         else float(np.sqrt(n))
-    )
-    base_tastes = (
-        float(args.etc_base_tastes)
-        if args.etc_base_tastes is not None
-        else float(n ** (2.0 / 3.0))
     )
     identity = hashlib.sha256()
     for example_id in example_ids:
@@ -1813,16 +2617,8 @@ def _manifest_and_fingerprint(
     else:
         boundary_rule = "before global rounds 1,2,4,8,..."
     manifest = {
-        "design": (
-            "pointwise-online-parameter-multiplier-sweep-v6"
-            if args.include_pgts
-            else "pointwise-online-parameter-multiplier-sweep-v5"
-        ),
-        "implementation_revision": (
-            PGTS_TUNING_IMPLEMENTATION_REVISION
-            if args.include_pgts
-            else TUNING_IMPLEMENTATION_REVISION
-        ),
+        "design": "pointwise-online-parameter-multiplier-sweep-v9",
+        "implementation_revision": TUNING_IMPLEMENTATION_REVISION,
         "cache": str(args.cache.resolve()),
         "examples": int(n),
         "context_dimension": int(contexts.shape[1]),
@@ -1839,7 +2635,7 @@ def _manifest_and_fingerprint(
             int(args.seed + index) for index in range(args.online_order_repeats)
         ],
         "policy_seed": int(args.policy_seed),
-        "tuned_policies": list(TUNED_POLICIES),
+        "tuned_policies": list(active_tuned_policies),
         "base_parameters": {
             "cbpside_beta_scale": float(args.cbpside_base_beta_scale),
             "cbpside_confidence_cap": float(
@@ -1851,22 +2647,13 @@ def _manifest_and_fingerprint(
             "cbpside_theta_regularization": float(
                 args.cbpside_theta_regularization
             ),
-            "igw_gamma": base_gamma,
-            "igw_gamma_rule": (
+            "squarecb_pmside_gamma": base_gamma,
+            "squarecb_pmside_gamma_rule": (
                 "command_line" if args.igw_base_gamma is not None else "sqrt(n)"
             ),
-            "etc_tastes": base_tastes,
-            "etc_tastes_rule": (
-                "command_line"
-                if args.etc_base_tastes is not None
-                else "n^(2/3), then ceil after multiplication"
+            "pgts_prior_std": (
+                float(args.pgts_prior_std) if args.include_pgts else None
             ),
-        },
-        "effective_etc_tastes": {
-            format(float(multiplier), ".12g"): min(
-                n, max(1, int(math.ceil(multiplier * base_tastes)))
-            )
-            for multiplier in args.multipliers
         },
         "update_schedule": {
             "name": args.adaptive_update_schedule,
@@ -1889,35 +2676,19 @@ def _manifest_and_fingerprint(
             "cbpside_theta": "refit only at boundary when new tastes exist",
             "cbpside_V_inverse": "recompute only at boundary and freeze in epoch",
             "cbpside_beta": "evaluate on every current context using epoch V inverse",
-            "igw_tree": (
+            "squarecb_pmside_tree": (
                 "buffered incremental update only at boundary"
                 if args.tree_estimator == "river-hoeffding"
                 else "full revealed-history refit only at boundary"
             ),
-            "igw_linear": "full revealed-history refit only at boundary",
+            "squarecb_pmside_linear": (
+                "full revealed-history refit only at boundary"
+            ),
         },
         "tree": _tree_settings(args),
-        "igw_tree_profile": _tree_settings(args),
-        "etc_hgb_profile": {
-            "settings": _etc_hgb_settings(args),
-            "established_profile": ONLINE_HGB_PROFILE,
-            "fit_rule": (
-                "when the prefix has at least two rows per class, fit once "
-                "with unit weights and freeze; otherwise use the recorded "
-                "Laplace-smoothed prevalence fallback"
-            ),
-        },
-        "etc_linear_profile": {
-            "settings": _linear_settings(),
-            "fit_rule": (
-                "when the prefix has at least two rows per class, fit once "
-                "with unit weights and freeze; otherwise use the recorded "
-                "Laplace-smoothed prevalence fallback"
-            ),
-            "forced_prefix_shared_with": POLICY_ETC,
-        },
-        "igw_linear_profile": _linear_settings(),
-        "igw_estimator_comparison": {
+        "squarecb_pmside_tree_profile": _tree_settings(args),
+        "squarecb_pmside_linear_profile": _linear_settings(),
+        "squarecb_pmside_estimator_comparison": {
             "shared_protocol": [
                 "contexts",
                 "selective-feedback protocol (each policy realizes its own history)",
@@ -1939,103 +2710,218 @@ def _manifest_and_fingerprint(
             "tree_policy": POLICY_IGW_TREE,
             "linear_policy": POLICY_IGW_LINEAR,
         },
-        "etc_estimator_comparison": {
-            "tree_policy": POLICY_ETC,
-            "linear_policy": POLICY_ETC_LINEAR,
-            "shared_protocol": [
-                "contexts",
-                "paired shuffled online orders",
-                "forced-taste multiplier grid",
-                "identical forced prefix for a given order and multiplier",
-                "unit training weights",
-                "shared two-rows-per-class feasibility gate and fallback",
-                "fit at most once and freeze",
-            ],
-            "selection": (
-                "each estimator selects its multiplier independently for each l01"
-            ),
-        },
         "hgb_profile": (
             ONLINE_HGB_PROFILE if args.tree_estimator == "hgb" else None
         ),
         "cbpside_theta_warm_started": not args.cbpside_zero_start,
-        "igw_mu": float(args.igw_mu),
-        "igw_min_propensity": float(args.igw_min_propensity),
+        "squarecb_pmside_mu": float(args.igw_mu),
+        "squarecb_pmside_min_propensity": float(args.igw_min_propensity),
         "selection": {
             "objective": "lowest mean realized total cost over all order runs",
             "tie_break": "closest multiplier to 1, then smaller multiplier",
             "pointwise_by": ["policy", "l01"],
+            "policies": list(active_tuned_policies),
             "selection_and_evaluation_orders_are_the_same": True,
-            "interpretation": "exploratory optimistic oracle envelope",
-            "error_bars": "plus/minus one sample SD across shuffled orders",
+            "interpretation": "exploratory optimistic selection envelope",
+            "error_bars": (
+                "pointwise two-sided 95% Student-t confidence intervals for "
+                "the mean across shuffled orders"
+            ),
         },
         "random": (
-            "analytic expected routing matched per order only to selected ETC "
-            "HGB traffic (not ETC Linear)"
+            "analytic expected routing matched per order and l01 to selected "
+            "SquareCB.PMSide tree traffic"
         ),
+        "regret_reference": {
+            "type": "fixed_row_aligned_cross_fitted_probability_reference",
+            "method": (
+                f"{args.reference_folds}-fold stratified out-of-fold HGB "
+                "leaves=15"
+            ),
+            "folds": int(args.reference_folds),
+            "splitter": "StratifiedKFold(shuffle=True)",
+            "split_seed": int(args.seed),
+            "model_seed": int(args.seed),
+            "hgb_profile": ONLINE_HGB_PROFILE,
+            "context_profile": args.context_profile,
+            "context_dimension": int(contexts.shape[1]),
+            "outcome_source": "cached_weak_strong_disagreement",
+            "benchmark_gold_answers_used": False,
+            "each_row_predicted_by_model_excluding_that_row": True,
+            "action_rule": "route strong when p_hat >= 1/l01",
+            "shared_across_online_policies_and_permutations": True,
+            "interpretation": (
+                "offline empirical reference assembled from fold models; "
+                "not an outcome-aware oracle and not by itself a theorem test"
+            ),
+            "prediction_artifact": REFERENCE_PREDICTIONS_NPZ,
+            "threshold_summary_csv": REFERENCE_RESULTS_CSV,
+            "threshold_summary_json": REFERENCE_RESULTS_JSON,
+        },
+        "learning_curves": {
+            "enabled": True,
+            "selection_scope": "pointwise selected policy per l01",
+            "checkpoint_action_encoding": (
+                "np.packbits uint8 with bitorder=little, then base64"
+            ),
+            "checkpoint_action_payload_internal": True,
+            "by_order_artifact": LEARNING_CURVE_NPZ,
+            "by_order_curve_dtype": "float32",
+            "aggregate_artifact": LEARNING_CURVE_CSV,
+            "aggregate_curve_dtype": "float64",
+            "cumulative_regret_plot_pattern": (
+                f"{LEARNING_CURVE_PLOT_PREFIX}<float_slug>.png"
+            ),
+            "average_regret_plot_pattern": (
+                f"{AVERAGE_REGRET_PLOT_PREFIX}<float_slug>.png"
+            ),
+            "primary_regret_metric": "cumulative_reference_regret",
+            "normalized_diagnostic": "average_reference_regret=R_t/t",
+            "cost_increment_definition": REALIZED_COST_INCREMENT_DEFINITION,
+            "clairvoyant_cost_increment_definition": (
+                CLAIRVOYANT_COST_INCREMENT_DEFINITION
+            ),
+            "regret_increment_definition": REGRET_INCREMENT_DEFINITION,
+            "clairvoyant_excess_increment_definition": (
+                CLAIRVOYANT_EXCESS_INCREMENT_DEFINITION
+            ),
+            "outcome_aware_diagnostic_retained_but_not_plotted": True,
+            "random_increment_definition": RANDOM_COST_INCREMENT_DEFINITION,
+            "selection_warning": LEARNING_CURVE_SELECTION_WARNING,
+            "json_artifact": None,
+        },
+        "disabled_policies": ["ETC", "ETCLinear"],
+        "fixed_policies": [],
+        "candidate_policies": list(active_tuned_policies),
+        "candidate_counts": {
+            "multiplier_tuned_checkpoints": (
+                len(active_tuned_policies)
+                * len(args.l01_values)
+                * len(args.multipliers)
+                * args.online_order_repeats
+            ),
+            "pgts_prior_tuned_checkpoints": (
+                len(args.l01_values)
+                * len(args.multipliers)
+                * args.online_order_repeats
+                if args.include_pgts
+                else 0
+            ),
+            "total_checkpoints": _expected_checkpoint_count(args),
+            "multiplier_tuned_execution_groups": (
+                len(active_tuned_policies)
+                * len(args.l01_values)
+                * len(args.multipliers)
+            ),
+            "pgts_prior_tuned_execution_groups": (
+                len(args.l01_values) * len(args.multipliers)
+                if args.include_pgts
+                else 0
+            ),
+            "total_execution_groups": (
+                len(active_tuned_policies)
+                * len(args.l01_values)
+                * len(args.multipliers)
+            ),
+        },
         "data_identity_sha256": identity.hexdigest(),
     }
     if args.include_pgts:
         manifest.update(
             {
-                "fixed_policies": [POLICY_PGTS],
-                "candidate_policies": [*TUNED_POLICIES, POLICY_PGTS],
-                "candidate_counts": {
-                    "multiplier_tuned_checkpoints": (
-                        len(TUNED_POLICIES)
-                        * len(args.l01_values)
-                        * len(args.multipliers)
-                        * args.online_order_repeats
-                    ),
-                    "fixed_pgts_checkpoints": (
-                        len(args.l01_values) * args.online_order_repeats
-                    ),
-                    "total_checkpoints": _expected_checkpoint_count(args),
-                    "multiplier_tuned_execution_groups": (
-                        len(args.multipliers)
-                        * (2 + 3 * len(args.l01_values))
-                    ),
-                    "fixed_pgts_execution_groups": len(args.l01_values),
-                    "total_execution_groups": (
-                        len(args.multipliers)
-                        * (2 + 3 * len(args.l01_values))
-                        + len(args.l01_values)
-                    ),
-                },
                 "pgts": {
                     "enabled": True,
                     "policy": POLICY_PGTS,
-                    "algorithm": "PG-TS Algorithm 1",
-                    "gibbs_steps_per_round": int(args.pgts_gibbs_steps),
+                    "algorithm": (
+                        "PG-TS Algorithm 1 scheduled-update approximation"
+                    ),
+                    "algorithm1_exact": False,
+                    "gibbs_steps_per_posterior_draw": int(
+                        args.pgts_gibbs_steps
+                    ),
                     "prior_mean": 0.0,
-                    "prior_std": float(args.pgts_prior_std),
-                    "prior_covariance": "prior_std^2 * identity",
+                    "base_prior_std": float(args.pgts_prior_std),
+                    "prior_std_multiplier_grid": [
+                        float(value) for value in args.multipliers
+                    ],
+                    "effective_prior_std_values": [
+                        float(args.pgts_prior_std * value)
+                        for value in args.multipliers
+                    ],
+                    "effective_prior_std_rule": (
+                        "base_prior_std * selected_multiplier"
+                    ),
+                    "prior_covariance": (
+                        "effective_prior_std^2 * identity"
+                    ),
                     "context_preprocessing": (
                         "row L2 normalization using max(1, norm), then prepend "
                         "intercept"
                     ),
-                    "posterior_draw": "final draw after M Gibbs transitions",
-                    "update_schedule": "every online round",
+                    "posterior_draw": (
+                        "final draw after M Gibbs transitions at an eligible "
+                        "configured boundary"
+                    ),
+                    "update_schedule": (
+                        "global-round "
+                        f"{_schedule_slug(args.adaptive_update_schedule, args.adaptive_max_round_gap)} "
+                        "boundaries"
+                    ),
+                    "update_rule": (
+                        "initial prior draw at round 1; later boundary draws "
+                        "only when new action-1 feedback arrived since the "
+                        "previous draw; reuse theta within each epoch"
+                    ),
+                    "eligible_boundary_rounds": adaptive_boundaries,
+                    "eligible_boundary_count": len(adaptive_boundaries),
                     "feedback": (
                         "only action-1 disagreement outcomes are revealed"
                     ),
                     "inverse_propensity_weighting": False,
-                    "multiplier_tuned": False,
+                    "multiplier_tuned": True,
+                    "selection_objective": (
+                        "lowest mean realized total cost pointwise by l01"
+                    ),
                     "optional_dependency": "polyagamma",
                 },
             }
         )
         manifest["update_schedule"]["pgts"] = (
-            "literal Gibbs posterior draw before every online action"
-        )
-        manifest["selection"].update(
-            {
-                "policies": list(TUNED_POLICIES),
-                "fixed_policies_excluded": [POLICY_PGTS],
-            }
+            "initial prior draw at round 1; thereafter draw only at configured "
+            "boundaries with new action-1 feedback, and freeze theta within epoch"
         )
     encoded = json.dumps(_jsonable(manifest), sort_keys=True).encode("utf-8")
     fingerprint = hashlib.sha256(encoded).hexdigest()
+    # Plot uncertainty is presentation-only: keeping it outside the checkpoint
+    # fingerprint lets completed revision-9 sweeps be regenerated with the new
+    # interval style via --plot-only, without rerunning any online policy.
+    manifest["learning_curves"]["plotted_uncertainty"] = {
+        "type": "pointwise_student_t_confidence_interval_for_mean",
+        "confidence_level": PLOT_CONFIDENCE_LEVEL,
+        "degrees_of_freedom": "online_order_repeats - 1",
+        "formula": (
+            "mean +/- t.ppf((1 + confidence_level) / 2, df) * "
+            "sample_sd / sqrt(n)"
+        ),
+        "simultaneous_band": False,
+        "post_selection_adjusted": False,
+    }
+    manifest["plot_presentation"] = {
+        "style_module": "llm_routing_simulation.plot_style",
+        "formats": ["png", "pdf"],
+        "png_dpi": PUBLICATION_PNG_DPI,
+        "figure_titles": False,
+        "figure_footnotes": False,
+        "axis_labels": dict(AXIS_LABELS),
+        "method_labels": dict(METHOD_LABELS),
+        "replicated_run_uncertainty": {
+            "type": "student_t_confidence_interval_for_mean",
+            "confidence_level": PLOT_CONFIDENCE_LEVEL,
+            "degrees_of_freedom": "online_order_repeats - 1",
+            "simultaneous_band": False,
+            "post_selection_adjusted": False,
+        },
+    }
     manifest["config_fingerprint"] = fingerprint
     return manifest, fingerprint
 
@@ -2052,6 +2938,8 @@ def _prepare_output(
                 "The output directory contains a different sweep configuration. "
                 "Choose a new directory rather than mixing checkpoints."
             )
+        if existing != manifest:
+            _atomic_write_json(manifest_path, manifest)
     else:
         if (output / "checkpoints").exists():
             raise SystemExit(
@@ -2067,12 +2955,7 @@ def _expected_checkpoint_count(args: argparse.Namespace) -> int:
         * len(args.multipliers)
         * args.online_order_repeats
     )
-    fixed_candidates = (
-        len(args.l01_values) * args.online_order_repeats
-        if args.include_pgts
-        else 0
-    )
-    return len(TUNED_POLICIES) * candidates_per_policy + fixed_candidates
+    return len(_active_tuned_policies(args)) * candidates_per_policy
 
 
 def _load_all_expected_checkpoints(
@@ -2082,7 +2965,7 @@ def _load_all_expected_checkpoints(
 ]:
     rows: list[dict[str, Any]] = []
     missing: list[tuple[str, float, float | None, int]] = []
-    for policy in TUNED_POLICIES:
+    for policy in _active_tuned_policies(args):
         for l01 in args.l01_values:
             for multiplier in args.multipliers:
                 for order_index in range(args.online_order_repeats):
@@ -2094,17 +2977,6 @@ def _load_all_expected_checkpoints(
                         missing.append((policy, l01, multiplier, order_index))
                     else:
                         rows.append(row)
-    if args.include_pgts:
-        for l01 in args.l01_values:
-            for order_index in range(args.online_order_repeats):
-                path = _checkpoint_path(
-                    output, POLICY_PGTS, l01, None, order_index
-                )
-                row = _load_checkpoint(path, fingerprint)
-                if row is None:
-                    missing.append((POLICY_PGTS, l01, None, order_index))
-                else:
-                    rows.append(row)
     return rows, missing
 
 
@@ -2118,120 +2990,68 @@ def _run_sweep(
     output: Path,
     fingerprint: str,
     base_gamma: float,
-    base_tastes: float,
 ) -> None:
     tree_settings = _tree_settings(args)
-    etc_hgb_settings = _etc_hgb_settings(args)
     linear_settings = _linear_settings()
-    total_candidate_groups = len(args.multipliers) * (
-        2 + 3 * len(args.l01_values)
-    ) + (len(args.l01_values) if args.include_pgts else 0)
+    active_tuned_policies = _active_tuned_policies(args)
+    total_candidate_groups = (
+        len(active_tuned_policies)
+        * len(args.l01_values)
+        * len(args.multipliers)
+    )
     group_number = 0
 
-    # Each feasible ETC estimator is fit once per order/multiplier; its frozen
-    # tail probabilities are reused across every l01 value.
-    for policy, estimator_settings in (
-        (POLICY_ETC, etc_hgb_settings),
-        (POLICY_ETC_LINEAR, linear_settings),
-    ):
-        for multiplier in args.multipliers:
-            group_number += 1
-            missing_orders = []
-            for order_index in range(args.online_order_repeats):
-                if any(
-                    _load_checkpoint(
-                        _checkpoint_path(
-                            output, policy, l01, multiplier, order_index
-                        ),
-                        fingerprint,
+    # PG-TS tunes its Gaussian-prior scale over the common multiplier grid.
+    # Each loss/multiplier/order has its own actions and revealed history.
+    if args.include_pgts:
+        for l01 in args.l01_values:
+            for multiplier in args.multipliers:
+                group_number += 1
+                missing_orders = []
+                for order_index in range(args.online_order_repeats):
+                    path = _checkpoint_path(
+                        output, POLICY_PGTS, l01, multiplier, order_index
                     )
-                    is None
-                    for l01 in args.l01_values
+                    if _load_checkpoint(path, fingerprint) is None:
+                        missing_orders.append(order_index)
+                print(
+                    f"[{group_number}/{total_candidate_groups}] "
+                    f"{_method_label(POLICY_PGTS, {})} l01={l01:g}, "
+                    f"prior-std multiplier={multiplier:g}; "
+                    f"{len(missing_orders)} order run(s) remaining",
+                    flush=True,
+                )
+                tasks = [
+                    {
+                        "normalized_features": normalized_features,
+                        "outcomes": outcomes,
+                        "permutation": permutations[order_index],
+                        "l01": l01,
+                        "l11": args.l11,
+                        "gibbs_steps": args.pgts_gibbs_steps,
+                        "prior_std": args.pgts_prior_std,
+                        "multiplier": multiplier,
+                        "order_index": order_index,
+                        "order_seed": args.seed + order_index,
+                        "policy_seed": args.policy_seed,
+                        "update_schedule": args.adaptive_update_schedule,
+                        "update_max_round_gap": args.adaptive_max_round_gap,
+                    }
+                    for order_index in missing_orders
+                ]
+                for row in _parallel_map(
+                    _simulate_pgts_candidate, tasks, args.jobs
                 ):
-                    missing_orders.append(order_index)
-            print(
-                f"[{group_number}/{total_candidate_groups}] "
-                f"{_method_label(policy, estimator_settings)} "
-                f"multiplier={multiplier:g}; "
-                f"{len(missing_orders)} order run(s) remaining",
-                flush=True,
-            )
-            tasks = [
-                {
-                    "contexts": contexts,
-                    "outcomes": outcomes,
-                    "permutation": permutations[order_index],
-                    "policy": policy,
-                    "l01_values": args.l01_values,
-                    "l11": args.l11,
-                    "multiplier": multiplier,
-                    "base_tastes": base_tastes,
-                    "order_index": order_index,
-                    "order_seed": args.seed + order_index,
-                    "policy_seed": args.policy_seed,
-                    "estimator_settings": estimator_settings,
-                }
-                for order_index in missing_orders
-            ]
-            for result_rows in _parallel_map(
-                _simulate_etc_candidates, tasks, args.jobs
-            ):
-                for row in result_rows:
                     path = _checkpoint_path(
                         output,
-                        policy,
-                        float(row["l01"]),
+                        POLICY_PGTS,
+                        l01,
                         multiplier,
                         int(row["order_run"]) - 1,
                     )
                     _save_checkpoint(path, row, fingerprint)
 
-    # PG-TS has no multiplier. Each loss/order is one fixed comparator
-    # trajectory because the loss changes its actions and revealed history.
-    if args.include_pgts:
-        for l01 in args.l01_values:
-            group_number += 1
-            missing_orders = []
-            for order_index in range(args.online_order_repeats):
-                path = _checkpoint_path(
-                    output, POLICY_PGTS, l01, None, order_index
-                )
-                if _load_checkpoint(path, fingerprint) is None:
-                    missing_orders.append(order_index)
-            print(
-                f"[{group_number}/{total_candidate_groups}] "
-                f"{_method_label(POLICY_PGTS, {})} l01={l01:g}; "
-                f"{len(missing_orders)} order run(s) remaining",
-                flush=True,
-            )
-            tasks = [
-                {
-                    "normalized_features": normalized_features,
-                    "outcomes": outcomes,
-                    "permutation": permutations[order_index],
-                    "l01": l01,
-                    "l11": args.l11,
-                    "gibbs_steps": args.pgts_gibbs_steps,
-                    "prior_std": args.pgts_prior_std,
-                    "order_index": order_index,
-                    "order_seed": args.seed + order_index,
-                    "policy_seed": args.policy_seed,
-                }
-                for order_index in missing_orders
-            ]
-            for row in _parallel_map(
-                _simulate_pgts_candidate, tasks, args.jobs
-            ):
-                path = _checkpoint_path(
-                    output,
-                    POLICY_PGTS,
-                    l01,
-                    None,
-                    int(row["order_run"]) - 1,
-                )
-                _save_checkpoint(path, row, fingerprint)
-
-    for policy in (POLICY_CBPSIDE, POLICY_IGW_LINEAR, POLICY_IGW_TREE):
+    for policy in BASE_TUNED_POLICIES:
         for l01 in args.l01_values:
             for multiplier in args.multipliers:
                 group_number += 1
@@ -2242,8 +3062,14 @@ def _run_sweep(
                     )
                     if _load_checkpoint(path, fingerprint) is None:
                         missing_orders.append(order_index)
+                progress_settings = (
+                    linear_settings
+                    if policy == POLICY_IGW_LINEAR
+                    else tree_settings
+                )
                 print(
-                    f"[{group_number}/{total_candidate_groups}] {policy} "
+                    f"[{group_number}/{total_candidate_groups}] "
+                    f"{_method_label(policy, progress_settings)} "
                     f"l01={l01:g}, multiplier={multiplier:g}; "
                     f"{len(missing_orders)} order run(s) remaining",
                     flush=True,
@@ -2318,7 +3144,10 @@ def _write_final_outputs(
     args: argparse.Namespace,
     fingerprint: str,
     outcomes: np.ndarray,
+    example_ids: Sequence[str],
+    permutations: np.ndarray,
     manifest: dict[str, Any],
+    reference: dict[str, Any],
 ) -> Path:
     candidate_rows, missing = _load_all_expected_checkpoints(
         output, args, fingerprint
@@ -2353,35 +3182,91 @@ def _write_final_outputs(
     igw_matched = _aggregate_igw_comparison(
         igw_matched_by_order, group_by_multiplier=True
     )
+    _write_reference_predictions_npz(
+        output / REFERENCE_PREDICTIONS_NPZ,
+        reference,
+        outcomes,
+        example_ids,
+    )
+    reference_rows = _reference_policy_rows(
+        reference, outcomes, args.l01_values, args.l11
+    )
+    _write_csv(output / REFERENCE_RESULTS_CSV, reference_rows)
+    _atomic_write_json(output / REFERENCE_RESULTS_JSON, reference_rows)
+    learning_curves = _build_selected_learning_curves(
+        selected_order_rows,
+        outcomes,
+        permutations,
+        reference["probability"],
+    )
+    _write_learning_curves_npz(
+        output / LEARNING_CURVE_NPZ, learning_curves
+    )
+    learning_curve_aggregates = _aggregate_learning_curves(learning_curves)
+    _write_learning_curve_aggregate_csv(
+        output / LEARNING_CURVE_CSV, learning_curve_aggregates
+    )
+    cumulative_reference_regret_plots = (
+        _plot_selected_cumulative_reference_regret(
+            output, learning_curve_aggregates
+        )
+    )
+    average_reference_regret_plots = _plot_selected_average_reference_regret(
+        output, learning_curve_aggregates
+    )
     selected_order_rows.extend(_expected_random_rows(selected_order_rows, outcomes))
     selected_aggregates = _aggregate_selected(selected_order_rows)
 
-    _write_csv(output / "candidate_results_by_order.csv", candidate_rows)
-    _atomic_write_json(output / "candidate_results_by_order.json", candidate_rows)
+    public_candidate_rows = [
+        _strip_internal_fields(row) for row in candidate_rows
+    ]
+    public_selected_order_rows = [
+        _strip_internal_fields(row) for row in selected_order_rows
+    ]
+    _write_csv(output / "candidate_results_by_order.csv", public_candidate_rows)
+    _atomic_write_json(
+        output / "candidate_results_by_order.json", public_candidate_rows
+    )
     _write_csv(output / "candidate_results.csv", candidate_aggregates)
     _atomic_write_json(output / "candidate_results.json", candidate_aggregates)
     _write_csv(output / "selected_multipliers.csv", selections)
     _atomic_write_json(output / "selected_multipliers.json", selections)
-    _write_csv(output / "selected_results_by_order.csv", selected_order_rows)
-    _atomic_write_json(output / "selected_results_by_order.json", selected_order_rows)
+    _write_csv(
+        output / "selected_results_by_order.csv", public_selected_order_rows
+    )
+    _atomic_write_json(
+        output / "selected_results_by_order.json", public_selected_order_rows
+    )
     _write_csv(output / "selected_results.csv", selected_aggregates)
     _atomic_write_json(output / "selected_results.json", selected_aggregates)
     _write_csv(
-        output / "igw_tree_vs_linear_by_order.csv", igw_comparison_by_order
+        output / "squarecb_pmside_tree_vs_linear_by_order.csv",
+        igw_comparison_by_order,
     )
     _atomic_write_json(
-        output / "igw_tree_vs_linear_by_order.json", igw_comparison_by_order
+        output / "squarecb_pmside_tree_vs_linear_by_order.json",
+        igw_comparison_by_order,
     )
-    _write_csv(output / "igw_tree_vs_linear.csv", igw_comparison)
-    _atomic_write_json(output / "igw_tree_vs_linear.json", igw_comparison)
     _write_csv(
-        output / "igw_tree_vs_linear_matched_by_order.csv", igw_matched_by_order
+        output / "squarecb_pmside_tree_vs_linear.csv", igw_comparison
     )
     _atomic_write_json(
-        output / "igw_tree_vs_linear_matched_by_order.json", igw_matched_by_order
+        output / "squarecb_pmside_tree_vs_linear.json", igw_comparison
     )
-    _write_csv(output / "igw_tree_vs_linear_matched.csv", igw_matched)
-    _atomic_write_json(output / "igw_tree_vs_linear_matched.json", igw_matched)
+    _write_csv(
+        output / "squarecb_pmside_tree_vs_linear_matched_by_order.csv",
+        igw_matched_by_order,
+    )
+    _atomic_write_json(
+        output / "squarecb_pmside_tree_vs_linear_matched_by_order.json",
+        igw_matched_by_order,
+    )
+    _write_csv(
+        output / "squarecb_pmside_tree_vs_linear_matched.csv", igw_matched
+    )
+    _atomic_write_json(
+        output / "squarecb_pmside_tree_vs_linear_matched.json", igw_matched
+    )
 
     _plot_selected_routing_accuracy(
         output / "selected_routing_accuracy.png", selected_aggregates
@@ -2391,37 +3276,41 @@ def _write_final_outputs(
         output / "selected_multiplier_vs_l01.png", selections
     )
     _plot_igw_estimator_comparison(
-        output / "igw_tree_vs_linear_cost_difference.png", igw_comparison
+        output / "squarecb_pmside_tree_vs_linear_cost_difference.png",
+        igw_comparison,
     )
     _plot_igw_matched_estimator_comparison(
-        output / "igw_tree_vs_linear_matched_cost_difference.png", igw_matched
+        output / "squarecb_pmside_tree_vs_linear_matched_cost_difference.png",
+        igw_matched,
     )
     summary = {
         "sweep": manifest,
+        "plot_presentation": manifest["plot_presentation"],
         "candidate_checkpoint_count": len(candidate_rows),
         "selection_count": len(selections),
         "selected_results": selected_aggregates,
-        "igw_tree_vs_linear_separately_tuned": igw_comparison,
-        "igw_tree_vs_linear_matched_gamma": igw_matched,
-        "igw_comparison_interpretation": {
+        "squarecb_pmside_tree_vs_linear_separately_tuned": igw_comparison,
+        "squarecb_pmside_tree_vs_linear_matched_gamma": igw_matched,
+        "squarecb_pmside_comparison_interpretation": {
             "difference": (
-                "linear IGW realized total cost minus tree IGW realized total "
-                "cost; positive values favor the nonlinear tree"
+                "linear SquareCB.PMSide realized total cost minus tree "
+                "SquareCB.PMSide realized total cost; positive values favor "
+                "the nonlinear tree"
             ),
             "separately_tuned": (
                 "best-vs-best comparison; selected gamma multipliers may differ"
             ),
             "matched_gamma": (
-                "same gamma multiplier and configured IGW protocol; estimator "
-                "family is the only configured difference, while realized "
-                "action-dependent histories may diverge"
+                "same gamma multiplier and configured SquareCB.PMSide protocol; "
+                "estimator family is the only configured difference, while "
+                "realized action-dependent histories may diverge"
             ),
         },
         "important_interpretation": (
-            f"Each point on a selected curve is the best of "
+            f"Each point on a multiplier-tuned policy curve is the best of "
             f"{len(args.multipliers)} multipliers on these same "
             f"{args.online_order_repeats} orders. Those curves are exploratory "
-            "optimistic oracle envelopes, not unbiased estimates of preselected "
+            "optimistic selection envelopes, not unbiased estimates of preselected "
             "policies. The matched-gamma comparison retains every multiplier "
             "without selecting a winner."
         ),
@@ -2430,23 +3319,114 @@ def _write_final_outputs(
             if {float(row["l11"]) for row in selected_aggregates} == {1.0}
             else "alpha = 1/(1+l01-l11)"
         ),
+        "regret_reference": {
+            "method": reference["method"],
+            "folds": int(reference["folds"]),
+            "seed": int(reference["seed"]),
+            "each_row_held_out": True,
+            "roc_auc": float(reference["roc_auc"]),
+            "log_loss": float(reference["log_loss"]),
+            "brier_score": float(reference["brier_score"]),
+            "prediction_artifact": REFERENCE_PREDICTIONS_NPZ,
+            "threshold_results": reference_rows,
+            "interpretation": (
+                f"fixed row-aligned {int(reference['folds'])}-fold OOF HGB-15 "
+                "probability reference; "
+                "shared across policies and online orders, but assembled from "
+                "fold models rather than one fitted policy"
+            ),
+        },
+        "learning_curves": {
+            "by_order_npz": LEARNING_CURVE_NPZ,
+            "aggregate_csv": LEARNING_CURVE_CSV,
+            "plot_formats": ["png", "pdf"],
+            "png_dpi": PUBLICATION_PNG_DPI,
+            "paired_pdf_for_every_png": True,
+            "cumulative_reference_regret_plots": [
+                path.name for path in cumulative_reference_regret_plots
+            ],
+            "average_reference_regret_plots": [
+                path.name for path in average_reference_regret_plots
+            ],
+            "trajectory_count": int(learning_curves["policy"].size),
+            "aggregate_policy_loss_groups": len(
+                learning_curve_aggregates
+            ),
+            "aggregate_csv_rows": int(
+                len(learning_curve_aggregates)
+                * learning_curves["round"].size
+            ),
+            "online_rounds": int(learning_curves["round"].size),
+            "policies": list(
+                dict.fromkeys(str(value) for value in learning_curves["policy"])
+            ),
+            "l01_values": sorted(
+                {float(value) for value in learning_curves["l01"]}
+            ),
+            "by_order_curve_dtype": "float32",
+            "aggregate_curve_dtype": "float64",
+            "uncertainty": {
+                "raw_statistics": (
+                    "mean, sample SD, and SEM across paired shuffled online "
+                    "orders"
+                ),
+                "plotted_interval": (
+                    "pointwise 95% Student-t confidence interval for the mean"
+                ),
+                "confidence_level": PLOT_CONFIDENCE_LEVEL,
+                "degrees_of_freedom": args.online_order_repeats - 1,
+                "t_critical": float(
+                    learning_curve_aggregates[0]["confidence_t_critical"]
+                ),
+                "formula": (
+                    "mean +/- t.ppf((1 + confidence_level) / 2, df) * "
+                    "sample_sd / sqrt(n)"
+                ),
+                "simultaneous_band": False,
+                "post_selection_adjusted": False,
+            },
+            "cost_increment_definition": REALIZED_COST_INCREMENT_DEFINITION,
+            "clairvoyant_cost_increment_definition": (
+                CLAIRVOYANT_COST_INCREMENT_DEFINITION
+            ),
+            "regret_increment_definition": REGRET_INCREMENT_DEFINITION,
+            "clairvoyant_excess_increment_definition": (
+                CLAIRVOYANT_EXCESS_INCREMENT_DEFINITION
+            ),
+            "primary_regret_comparator": reference["method"],
+            "outcome_aware_diagnostic_retained_but_not_plotted": True,
+            "random_increment_definition": RANDOM_COST_INCREMENT_DEFINITION,
+            "selection_warning": LEARNING_CURVE_SELECTION_WARNING,
+            "normal_result_tables_include_internal_action_payload": False,
+            "json_artifact": None,
+        },
     }
     if args.include_pgts:
         summary.update(
             {
-                "fixed_policy_checkpoint_count": (
-                    len(args.l01_values) * args.online_order_repeats
+                "pgts_prior_tuned_checkpoint_count": (
+                    len(args.l01_values)
+                    * len(args.multipliers)
+                    * args.online_order_repeats
                 ),
-                "fixed_policies": [POLICY_PGTS],
-                "important_interpretation": (
-                    f"For {len(TUNED_POLICIES)} multiplier-tuned policies, each "
-                    f"selected point is the best of {len(args.multipliers)} "
-                    f"multipliers on these same {args.online_order_repeats} "
-                    "orders, so those curves are exploratory optimistic oracle "
-                    "envelopes. PG-TS is a fixed comparator with no multiplier "
-                    "selection, and Random remains analytically matched only to "
-                    "selected ETC HGB traffic. The matched-gamma IGW comparison "
-                    "retains every multiplier without selecting a winner."
+                "fixed_policies": [],
+                "pgts_prior_std_tuning": {
+                    "base_prior_std": float(args.pgts_prior_std),
+                    "multiplier_grid": [
+                        float(value) for value in args.multipliers
+                    ],
+                    "effective_prior_std_values": [
+                        float(args.pgts_prior_std * value)
+                        for value in args.multipliers
+                    ],
+                    "selection": (
+                        "lowest mean realized total cost pointwise by l01"
+                    ),
+                },
+                "pgts_interpretation": (
+                    "prior-standard-deviation-tuned scheduled-update "
+                    "approximation: draw initially and at configured boundaries "
+                    "with new revealed feedback, then reuse theta within the epoch"
                 ),
             }
         )
@@ -2474,6 +3454,12 @@ def main(argv: Iterable[str] | None = None) -> int:
     outcomes = np.asarray(
         [round_.routing_outcome for round_ in rounds], dtype=np.int8
     )
+    reference_class_counts = np.bincount(outcomes, minlength=2)
+    if np.any(reference_class_counts < args.reference_folds):
+        raise SystemExit(
+            "The cross-fitted reference needs at least --reference-folds "
+            "eligible examples from each outcome class"
+        )
     example_ids = [round_.example_id for round_ in rounds]
     normalized_features = _normalized_cbpside_features(contexts)
     manifest, fingerprint = _manifest_and_fingerprint(
@@ -2511,24 +3497,35 @@ def main(argv: Iterable[str] | None = None) -> int:
         )
         temporary_permutations.replace(permutation_path)
 
-    base_gamma = float(manifest["base_parameters"]["igw_gamma"])
-    base_tastes = float(manifest["base_parameters"]["etc_tastes"])
+    base_gamma = float(
+        manifest["base_parameters"]["squarecb_pmside_gamma"]
+    )
     pgts_status = (
-        f"PG-TS=fixed M={args.pgts_gibbs_steps}, "
-        f"prior_std={args.pgts_prior_std:g}; "
+        f"PG-TS=prior-std-tuned scheduled approximation "
+        f"M={args.pgts_gibbs_steps}, base prior_std={args.pgts_prior_std:g}; "
         if args.include_pgts
         else ""
     )
     print(
         f"Loaded {len(rounds):,} eligible rows with {contexts.shape[1]} features. "
-        f"IGW Tree={args.tree_estimator}; IGW Linear=enabled; "
-        f"ETC HGB leaves={args.hgb_max_leaf_nodes}; ETC Linear=enabled; "
+        f"SquareCB.PMSide tree={args.tree_estimator}; "
+        "SquareCB.PMSide linear=enabled; "
+        "ETC HGB=disabled; ETC Linear=disabled; "
         f"{pgts_status}"
+        f"regret reference={args.reference_folds}-fold OOF HGB-15; "
         "adaptive schedule="
         f"{_schedule_slug(args.adaptive_update_schedule, args.adaptive_max_round_gap)}; "
         f"{args.online_order_repeats} paired orders; "
-        f"base gamma={base_gamma:.12g}; base ETC tastes={base_tastes:.12g}.",
+        f"base gamma={base_gamma:.12g}.",
         flush=True,
+    )
+    # Build the offline comparator once, before any online policy replay.  It
+    # remains evaluation-only and is never passed into a routing algorithm.
+    reference = _cross_fitted_hgb_reference(
+        contexts,
+        outcomes,
+        folds=args.reference_folds,
+        seed=args.seed,
     )
     if not args.plot_only:
         _run_sweep(
@@ -2540,14 +3537,16 @@ def main(argv: Iterable[str] | None = None) -> int:
             output=output,
             fingerprint=fingerprint,
             base_gamma=base_gamma,
-            base_tastes=base_tastes,
         )
     bundle = _write_final_outputs(
         output=output,
         args=args,
         fingerprint=fingerprint,
         outcomes=outcomes,
+        example_ids=example_ids,
+        permutations=permutations,
         manifest=manifest,
+        reference=reference,
     )
     print(f"Finished. Results: {bundle}", flush=True)
     return 0

@@ -13,7 +13,7 @@ decision.
 | `experiment/residual-diagnostics` | Real-data model-specification diagnostics |
 | `experiment/prompt-embedding` | Incremental semantic prompt-feature test |
 | `experiment/prompt-routing` | Frozen BoolQ empirical-scale-0.25 baseline at `a95a3ae` |
-| `experiment/boolq-cbpside-beta1` | BoolQ context studies and 138D sample-size-scaled exploration follow-up |
+| `experiment/boolq-cbpside-beta1` | BoolQ context studies, 138D SquareCB.PMSide/CBPSide tuning, and fixed-reference regret evaluation |
 | `backup/current-combined` | Recovery snapshot before branch separation |
 
 Initial combined checkpoint: tag `current-combined-v1`, commit `3905bbf`.
@@ -1521,6 +1521,434 @@ Do not point the PG-TS run at the existing revision-5 seven-multiplier output
 directory. Identical revision-6 commands remain resumable at candidate level,
 and `--plot-only` does not require importing `polyagamma` once all checkpoints
 exist.
+
+### BoolQ 138D revision-7 pure-doubling SquareCB.PMSide/CBPSide study, 2026-09-24
+
+Branch: `experiment/boolq-cbpside-beta1`
+
+Status: implemented as the next planned configuration; no experiment was run
+during implementation and no numerical conclusion is recorded. This design
+supersedes the unrun gap-32 seven-multiplier plan above without rewriting or
+deleting any historical experiment entry or artifact.
+
+Scientific inputs remain fixed: all 12,648 eligible BoolQ examples are online
+rounds, all 138 complete manifest-defined features are used, cached weak/strong
+disagreement is the routing outcome, cached strong answers are the evaluation
+reference, and BoolQ gold labels are not routing labels. The nine ascending
+`l01` values, 20 paired shuffled orders, CBPSide base scale 0.5 and cap 0.5,
+SquareCB.PMSide base `gamma=sqrt(n)` with `mu=2`, capped SquareCB.PMSide
+inverse-propensity weights,
+policy seed 0, HGB maximum 15 leaves, pointwise cost-based selection, and
+sample-SD error bars also remain fixed.
+
+The revision changes four design choices:
+
+1. ETC HGB and ETC Linear are disabled. The multiplier-tuned policies are only
+   CBPSide linear logistic, SquareCB.PMSide + linear logistic, and
+   SquareCB.PMSide + HGB.
+2. The common multiplier grid returns to
+   `m = 0.1, 0.3, 1, 3, 10`. CBPSide applies it to its pre-cap beta scale and
+   both SquareCB.PMSide variants apply it to `sqrt(n)` gamma.
+3. All three tuned policies update estimator snapshots before pure-doubling
+   global rounds `1,2,4,8,...`. A snapshot at round `t` may use feedback only
+   through `t-1`, but every policy still chooses an action on every round.
+4. Analytic Random is matched after selection to selected SquareCB.PMSide +
+   HGB traffic for each loss/order. It is no longer linked to an ETC curve and
+   does not add a
+   tuned candidate or inner Monte Carlo loop.
+
+For `n=12,648`, pure doubling has 14 boundaries through round 8,192 and permits
+at most 13 post-feedback refits. The final inclusive epoch from round 8,192
+through 12,648 has 4,457 rounds. This is deliberately much cheaper than the
+earlier capped-doubling schedules, at the cost of a longer potentially stale
+tail.
+
+The base design has:
+
+```text
+3 tuned policies * 9 losses * 5 multipliers * 20 orders = 2,700 checkpoints
+135 execution groups and candidate aggregates
+27 selected multipliers
+720 selected order rows after adding Random
+36 selected summaries
+```
+
+Optional PG-TS remains a fixed Bayesian linear-logistic comparator rather than
+a fourth tuned policy. Its zero-mean isotropic Gaussian prior defaults to
+standard deviation 1. At round 1 it performs its first `M=15`-transition Gibbs
+draw from the prior. At each later configured estimator boundary, it makes
+`M=15` complete Pólya-Gamma Gibbs
+transitions using action-1 feedback through the preceding round, but only if
+new feedback arrived since the prior PG-TS draw; otherwise it retains its
+current parameter. The new final draw is frozen and reused throughout the next
+epoch. `--pgts-gibbs-steps` and `--pgts-prior-std` expose these settings, and
+`--policy-seed` seeds both Gaussian and Pólya-Gamma draws. The 138D
+row-normalized context plus intercept gives a 139D parameter. Only action-1
+feedback enters its posterior, with no inverse-propensity weighting. PG-TS has
+no generic multiplier and is excluded from multiplier selection.
+
+This scheduled PG-TS is explicitly a runtime approximation, not literal
+Algorithm 1. The revision-6 entry above preserves the historical faithful
+every-round design. Under the default pure-doubling schedule and full horizon,
+revision 7 has at most 14 posterior draws/model updates: the round-1 draw plus
+13 later draws. This is at most 210 Gibbs transitions per trajectory with
+`M=15`; an epoch without new action-1 feedback removes that later boundary
+update.
+
+PG-TS adds 180 fixed checkpoints and nine execution groups/aggregates. The
+enabled design therefore has 2,880 checkpoints, 144 groups and candidate
+aggregates, the same 27 multiplier selections, 900 selected order rows after
+adding Random, and 45 selected summaries.
+
+Revision 7 always records the complete learning curve of every selected policy
+at every loss. CBPSide and both SquareCB.PMSide variants use their pointwise
+selected multiplier; scheduled PG-TS uses its fixed configuration when
+enabled. For
+outcome `y_t`, the realized round cost is 1 after a strong route and
+`l01*y_t` after a weak route. With `l11=1` and `l01>=1`, the clairvoyant oracle
+pays `y_t`, giving
+
+```text
+cumulative_cost_t   = sum_{s<=t} cost_s
+cumulative_regret_t = sum_{s<=t} (cost_s - y_s)
+```
+
+Analytic Random uses the selected SquareCB.PMSide + HGB order/loss routing
+rate `q`, so its
+expected round cost is `q + (1-q)*l01*y_t`. The selected learning curves reuse
+the same 20 orders used to select each multiplier. They are optimistic
+exploratory curves, not unbiased holdout learning curves.
+
+The reusable outputs are `selected_learning_curves_by_order.npz`, containing
+compact per-policy/loss/order/round cumulative cost and regret with axes and
+metadata, and `selected_learning_curves.csv`, containing per-policy/loss/round
+mean, sample SD, and SEM for both metrics. No large learning-curve JSON is
+written. Each loss produces one cumulative-regret comparison figure named
+`selected_cumulative_regret_l01-<float_slug>.png`, for example
+`selected_cumulative_regret_l01-3p3.png`. Plotting regret removes the shared
+approximately linear oracle-cost component while retaining both metrics in the
+reusable NPZ and CSV. The existing final-horizon
+`selected_cost_vs_l01.png` remains part of the result bundle.
+The estimator-comparison artifacts are
+`squarecb_pmside_tree_vs_linear_by_order.csv/json`,
+`squarecb_pmside_tree_vs_linear.csv/json`,
+`squarecb_pmside_tree_vs_linear_matched_by_order.csv/json`, and
+`squarecb_pmside_tree_vs_linear_matched.csv/json`. Their figures are
+`squarecb_pmside_tree_vs_linear_cost_difference.png` and
+`squarecb_pmside_tree_vs_linear_matched_cost_difference.png`.
+
+Mandatory scheduled-PG-TS timing pilot; this is an execution check, not a
+research result, and implementation work did not run it. Its 25 rounds contain
+five eligible doubling boundaries, so at most five posterior draws/model
+updates and 75 Gibbs transitions occur; four draws are later than round 1:
+
+```powershell
+.\.routing-venv\Scripts\python.exe -m pip install -e ".[test,pgts]"
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-revision7-pgts-pilot `
+  --context-profile all-features `
+  --limit 25 `
+  --l01-values 2.6 `
+  --multipliers 1 `
+  --online-order-repeats 2 `
+  --adaptive-update-schedule doubling `
+  --squarecb-pmside-mu 2 `
+  --squarecb-pmside-min-propensity 0.1 `
+  --include-pgts `
+  --pgts-gibbs-steps 15 `
+  --pgts-prior-std 1 `
+  --jobs 1 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+Only after the pilot establishes acceptable runtime, the planned full
+comparison is:
+
+The canonical policy controls are `--squarecb-pmside-base-gamma`,
+`--squarecb-pmside-mu`, and `--squarecb-pmside-min-propensity`. The base-gamma
+option is deliberately omitted below so the tuner derives `sqrt(n)`.
+
+```powershell
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-138d-cbpside-squarecb-pmside-pgts-doubling-multiplier5-results `
+  --context-profile all-features `
+  --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
+  --multipliers 0.1 0.3 1 3 10 `
+  --online-order-repeats 20 `
+  --adaptive-update-schedule doubling `
+  --cbpside-base-beta-scale 0.5 `
+  --cbpside-max-confidence-radius 0.5 `
+  --squarecb-pmside-mu 2 `
+  --squarecb-pmside-min-propensity 0.1 `
+  --tree-estimator hgb `
+  --hgb-max-leaf-nodes 15 `
+  --include-pgts `
+  --pgts-gibbs-steps 15 `
+  --pgts-prior-std 1 `
+  --jobs 1 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+Omit the three PG-TS flags and use a different fresh output directory for the
+2,700-checkpoint base study. Never point revision 7 at any revision-3 through
+revision-6 directory. Candidate-level resume and `--plot-only` require the
+identical revision-7 scientific options and configuration fingerprint.
+
+### BoolQ 138D revision-8 fixed-reference regret study, 2026-09-25
+
+Branch: `experiment/boolq-cbpside-beta1`
+
+Status: superseded planned configuration; implementation work did not launch
+this revision. Revision 9 retains its cross-fitted reference and publication
+outputs but replaces fixed PG-TS with pointwise prior-scale tuning. Revision 7
+and its outcome-oracle learning-curve figures remain historical artifacts, and
+the unrun revision-8 directory must not be reused by revision-9 code.
+
+Motivation: the revision-7 quantity
+`sum_{s<=t}(cost_s-y_s)` compares an online policy with a per-round outcome-aware
+oracle. Any persistent prediction error against that unattainable oracle can
+produce an approximately linear curve. It is therefore not the appropriate
+primary curve for asking whether online excess cost relative to a fixed learned
+reference mapping becomes sublinear.
+
+Revision 8 leaves the routing experiment unchanged: all 12,648 eligible BoolQ
+rows and all 138 manifest-defined features; nine `l01` values; 20 paired online
+orders; multipliers `0.1, 0.3, 1, 3, 10`; CBPSide scale 0.5 and cap 0.5;
+SquareCB.PMSide base `gamma=sqrt(n)`, `mu=2`, and minimum propensity 0.1;
+15-leaf HGB; pure-doubling estimator boundaries; optional scheduled PG-TS; and
+analytic Random matched to selected SquareCB.PMSide + HGB traffic. Pointwise
+multiplier selection still minimizes final realized total cost on the same 20
+orders, so its selected curves remain optimistic exploratory envelopes.
+
+The only scientific change is the primary learning-curve comparator. Before
+online evaluation, construct one fixed row-aligned reference mapping from the
+eligible data. It is stitched from five fold-specific models, rather than being
+one globally fitted model; "reference policy" below is shorthand for that fixed
+mapping:
+
+1. Use five-fold stratified shuffled cross-fitting with split seed `--seed`.
+2. In every fold, fit the exact `ONLINE_HGB_PROFILE`: log loss, learning rate
+   0.05, 50 boosting iterations, 15 maximum leaves, minimum leaf size 20, L2
+   regularization 1.0, and early stopping disabled.
+3. Train on all 138 selected context features and cached weak/strong-
+   disagreement labels. BoolQ gold labels remain excluded.
+4. Assign every held-out row its fold model's disagreement probability. Thus
+   no row is predicted by a reference model trained on that row.
+5. For each loss, fix the reference route as
+   `a_i^ref = 1[p_i^oof >= 1/l01]`, with equality routed strong. Fix these
+   row-aligned actions once; for an online order, only permute them into that
+   order.
+
+This reference is strictly an offline evaluation comparator. Its probabilities,
+actions, fold labels, and future outcomes are never exposed to CBPSide,
+SquareCB.PMSide, PG-TS, or their feedback histories. The same fixed mapping is
+shared across every policy, multiplier, and shuffled order.
+
+For online action `a_t`, disagreement `y_t`, and the corresponding fixed
+reference action `a_t^ref`, define
+
+```text
+cost_t     = a_t     + (1-a_t)     * l01 * y_t
+cost_t^ref = a_t^ref + (1-a_t^ref) * l01 * y_t
+
+R_t^ref      = sum_{s<=t} (cost_s - cost_s^ref)
+average_R_t  = R_t^ref / t
+```
+
+The primary per-loss figures plot `R_t^ref` and `R_t^ref/t`. Every revision-8
+tuning figure with replicated-online-order uncertainty uses a fixed, pointwise,
+two-sided 95% Student-`t` confidence interval. This includes both learning-curve
+families, selected routing-rate versus accuracy, selected total cost, and the
+separately tuned and matched tree-versus-linear cost differences. The selected-
+multiplier plot has no uncertainty display. At every plotted point, let `n` be
+the number of trial values, `df=n-1`, and `s` their sample SD. The
+margin is `t.ppf(0.975,df)*s/sqrt(n)`, and the lower and upper limits are
+`mean-margin` and `mean+margin`; there is no 0.5 factor. Reference-policy regret
+can be negative when an online policy realizes lower cost than the fixed
+reference. A flattening `R_t^ref/t` is useful descriptive evidence of
+diminishing average excess cost, but neither plot proves a theoretical
+`sqrt(T)` guarantee. In particular, the cross-fitted reference is a
+dataset-specific mapping stitched from fold-specific offline HGB models rather
+than the formal best policy in a prespecified theorem class. The displayed
+intervals are not simultaneous and are not post-selection adjusted. For the
+non-learning plots, the renderer computes each interval from the aggregate
+mean, sample SD, and `online_order_repeats`; the aggregate tables keep their
+existing mean/SD/SEM schema rather than adding CI columns. The learning CSV
+retains the explicit CI bounds below.
+
+Retain revision 7's outcome-aware quantity
+`sum_{s<=t}(cost_s-y_s)` in the NPZ and CSV as
+`cumulative_clairvoyant_excess_cost`. Do not label it primary regret. The
+reusable learning-curve artifacts must also retain `cumulative_cost`,
+`cumulative_reference_cost`, `cumulative_reference_regret`, and
+`average_reference_regret` so plots can be restyled without rerunning policies.
+The aggregate CSV keeps the raw mean, sample SD, and SEM and adds
+`confidence_level=0.95`, `confidence_df=n-1`, `confidence_t_critical`,
+`cumulative_reference_regret_ci95_lower`,
+`cumulative_reference_regret_ci95_upper`,
+`average_reference_regret_ci95_lower`, and
+`average_reference_regret_ci95_upper`.
+
+Publication rendering is centralized in
+`src/llm_routing_simulation/plot_style.py`, which owns method and axis labels,
+legend/font sizes, figure sizes, and export DPI. All tuning plots omit titles
+and figure footnotes. The exact public labels are `PG-TS (Bayesian logistic)`
+and `Random`; the selected-cost axes are `$\ell_{01}$` and `Total cost`, while
+the cumulative-reference-regret axes visually read `Round (t)` and
+`Regret (excess cost)`. Every figure is emitted as a vector PDF plus a same-stem
+400-DPI PNG.
+The module exposes `PLOT_CONFIDENCE_LEVEL=0.95`, `AXIS_LABELS`, `METHOD_LABELS`,
+`LEGEND_FONT_SIZE=8.0`,
+`PUBLICATION_FIGSIZE=(7.0, 4.25)`,
+`PUBLICATION_FIGSIZE_SHORT=(7.0, 3.8)`, and `PUBLICATION_PNG_DPI=400`;
+`publication_pyplot` applies shared Matplotlib settings and
+`save_publication_figure` creates the PDF/PNG pair.
+The manifest's top-level `plot_presentation` block records the formats, DPI,
+title/footnote switches, axis and method labels, and replicated-run interval
+contract; `summary.json` echoes it and records the paired learning-curve formats.
+
+These plotting choices are presentation metadata, not a new policy or selection
+rule. After a compatible sweep has all required checkpoints, rerun the identical
+command with `--plot-only` to rebuild aggregate tables, both figure formats,
+the summary, and the ZIP without replaying any online policy.
+Persist the auditable row-level comparator in
+`cross_fitted_hgb_reference.npz`, including float64 OOF probabilities, example
+IDs, cached outcomes, and fold assignments. Its per-loss routing/cost summaries
+are `cross_fitted_hgb_reference_results.csv/json`.
+
+Historical planned full run, including fixed scheduled PG-TS; the directory was
+deliberately
+different from the completed revision-7 directory. This is the full
+2,880-checkpoint design: 2,700 multiplier-tuned candidates plus 180 fixed PG-TS
+candidates. Omitting the three PG-TS options would instead run the 2,700-
+checkpoint base design and must use a different fresh directory:
+
+```powershell
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-138d-cbpside-squarecb-pmside-pgts-reference-regret-results `
+  --context-profile all-features `
+  --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
+  --multipliers 0.1 0.3 1 3 10 `
+  --online-order-repeats 20 `
+  --reference-folds 5 `
+  --adaptive-update-schedule doubling `
+  --cbpside-base-beta-scale 0.5 `
+  --cbpside-max-confidence-radius 0.5 `
+  --squarecb-pmside-mu 2 `
+  --squarecb-pmside-min-propensity 0.1 `
+  --tree-estimator hgb `
+  --hgb-max-leaf-nodes 15 `
+  --include-pgts `
+  --pgts-gibbs-steps 15 `
+  --pgts-prior-std 1 `
+  --jobs 4 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+This command is retained only as provenance for the unrun revision-8 plan.
+Current revision-9 code has a different design fingerprint and must reject this
+directory rather than resume or replot it.
+
+### BoolQ 138D revision-9 tuned PG-TS prior-scale study, 2026-09-25
+
+Branch: `experiment/boolq-cbpside-beta1`
+
+Status: implemented as the next planned configuration; implementation work did
+not launch the experiment. Use only the fresh
+`boolq-138d-cbpside-squarecb-pmside-pgts-prior-tuned-results` directory.
+
+Revision 9 retains revision 8's data, routing policies, five-fold cross-fitted
+HGB-15 reference mapping, cost/regret definitions, pure-doubling update
+boundaries, 20 paired shuffled orders, five-value common multiplier grid,
+publication style, Student-`t` intervals, and analytic Random construction. The
+scientific change is that scheduled PG-TS is now the fourth multiplier-tuned
+policy rather than a fixed comparator.
+
+For PG-TS candidate multiplier `m`, define
+
+```text
+effective_prior_std = --pgts-base-prior-std * m
+theta ~ N(0, effective_prior_std^2 I)
+```
+
+`--pgts-prior-std` remains a backward-compatible alias; the revision-9 command
+uses the canonical `--pgts-base-prior-std` name.
+
+The full study fixes the base `--pgts-base-prior-std` at 1 and evaluates
+`m in {0.1, 0.3, 1, 3, 10}` for every `l01` and every one of the same 20 paired
+online orders. At each loss, select the PG-TS multiplier with the lowest mean
+realized total cost across those orders. The common tie rule still prefers the
+multiplier closest to 1 and then the smaller multiplier. Candidate rows record
+`parameter_name=prior_std`, `base_parameter=--pgts-base-prior-std`, the candidate
+`multiplier`, `effective_parameter=base_parameter*multiplier`, and
+`pgts_prior_std=effective_parameter`.
+
+Only the prior scale is tuned. PG-TS still performs 15 Pólya-Gamma Gibbs
+transitions at each actual posterior update, draws initially at round 1, checks
+for later updates only at pure-doubling global rounds, and resamples there only
+when new action-1 feedback has arrived. Its sampled parameter remains fixed
+within an epoch, but the public method/legend label is exactly
+`PG-TS (Bayesian logistic)` with no scheduling or freezing qualifier. PG-TS now
+appears in `selected_multipliers.csv/json` and the multiplier figure.
+
+The complete counts are:
+
+```text
+4 tuned policies * 9 losses * 5 multipliers * 20 orders = 3,600 checkpoints
+180 execution groups and candidate aggregates
+PG-TS subset = 900 checkpoints and 45 groups/aggregates; fixed-PG-TS rows = 0
+36 pointwise multiplier selections
+900 selected order rows after adding analytic Random
+45 selected summaries
+```
+
+The manifest's `candidate_counts` uses
+`multiplier_tuned_checkpoints=3600`, `pgts_prior_tuned_checkpoints=900`,
+`total_checkpoints=3600`, `multiplier_tuned_execution_groups=180`,
+`pgts_prior_tuned_execution_groups=45`, and `total_execution_groups=180`.
+
+The manifest design is `pointwise-online-parameter-multiplier-sweep-v9` with
+implementation revision 9. This fingerprint is deliberately incompatible with
+the unrun revision-8 fixed-PG-TS directory and every earlier output directory.
+Omitting `--include-pgts` produces a distinct three-policy design and must use a
+different directory.
+
+Planned full command:
+
+```powershell
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-138d-cbpside-squarecb-pmside-pgts-prior-tuned-results `
+  --context-profile all-features `
+  --l01-values 1.8 2.0 2.2 2.4 2.6 2.8 3.0 3.2 3.3 `
+  --multipliers 0.1 0.3 1 3 10 `
+  --online-order-repeats 20 `
+  --reference-folds 5 `
+  --adaptive-update-schedule doubling `
+  --cbpside-base-beta-scale 0.5 `
+  --cbpside-max-confidence-radius 0.5 `
+  --squarecb-pmside-mu 2 `
+  --squarecb-pmside-min-propensity 0.1 `
+  --tree-estimator hgb `
+  --hgb-max-leaf-nodes 15 `
+  --include-pgts `
+  --pgts-gibbs-steps 15 `
+  --pgts-base-prior-std 1 `
+  --jobs 4 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+Rerun the identical command to resume missing revision-9 checkpoints. Once all
+3,600 exist, add `--plot-only` with every other option unchanged to rebuild the
+aggregate tables, vector PDFs, 400-DPI PNGs, summary, and ZIP without replaying
+the online policies.
 
 ### Prompt-only 20D real-label fine-grid study, 2026-09-03
 

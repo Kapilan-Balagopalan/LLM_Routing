@@ -18,62 +18,121 @@
 - `experiment/prompt-routing`: frozen prompt-routing and BoolQ empirical-scale
   0.25 baseline at commit `a95a3ae`.
 - `experiment/boolq-cbpside-beta1`: BoolQ confidence-scale and context
-  follow-up; the active study uses all 138 features, CBPSide scale 0.5/cap
-  0.5, ETC `ceil(n^(2/3))` tastes, IGW `gamma=sqrt(n)`, and ten paired shuffled
-  online orders with sample-SD error bars. CBPSide and IGW refit after every
-  five additional tastes; ETC still fits once and freezes. The separate
-  `tune-llm-routing` study extends this baseline to 20 paired orders and
-  pointwise multipliers `0.03, 0.1, 0.3, 1, 3, 10, 30`, using resumable
-  candidate checkpoints. Completed revision-3 pure-doubling and revision-4
-  Fibonacci artifacts are retained in their original fingerprinted output
-  directories;
-  their numerical results were not analyzed during the revision-5 code change,
-  and current revision-5 code cannot resume or plot-only those directories.
-  Use the corresponding original code revision for those archived artifacts.
-  Completed revision-5 capped-doubling gap-500, gap-100, and gap-32 artifacts
-  are also retained; each directory contains all 4,500 candidate checkpoints
-  and its finalized tables, figures, summary, and ZIP bundle. Their numerical
-  results were not analyzed during the subsequent schedule code changes.
-  Current revision-5 code can resume or plot-only a completed result only with
-  its original output directory and the corresponding explicit
-  `--adaptive-max-round-gap 500`, `--adaptive-max-round-gap 100`, or
-  `--adaptive-max-round-gap 32`. A later gap-8 attempt contains 3,902 of its
-  planned 4,500 checkpoints and no finalized tables, summary, figures, or ZIP;
-  preserve it as an incomplete five-multiplier artifact. The current planned,
-  unrun gap-32/seven-multiplier configuration has five tuned policies:
-  CBPSide, fixed 15-leaf HGB ETC, ETCLinear, IGW Tree, and IGW Linear. The two
-  ETC variants share each shuffled order, forced prefix, taste budget, and unit
-  training weights; each feasible prefix fits once, freezes, reuses
-  probabilities across `l01`, and independently tunes its taste multiplier.
-  A prefix with fewer than two rows from either class uses the recorded
-  Laplace-smoothed prevalence fallback without fitting. Random is matched only
-  to selected HGB ETC traffic. CBPSide and both IGW variants now default to
-  capped-doubling global-round boundaries: start at 1 and set the next boundary
-  to `min(2b, b+32)`. Fit before boundary `b` using feedback through `b-1`,
-  while evaluating the policy every round. The ETC variants are unaffected by
-  this schedule. Use `--adaptive-update-schedule fibonacci` or
-  `--adaptive-update-schedule doubling` to select those boundary rules for a
-  new revision-5 run, not to resume the older revision-4 or revision-3 outputs.
-  Report both separately tuned best-vs-best and fixed-multiplier
-  matched-gamma IGW comparisons; actions and realized feedback may diverge.
-  HGB remains the nonlinear primary and `river-hoeffding` changes IGW Tree
-  only. The design has 6,300 candidate rows/checkpoints and selects five learned
-  policies plus Random. Execution reports 203 candidate groups: seven for each
-  ETC estimator and 63 for each of the three adaptive policies. At `n=12,648`,
-  capped doubling with gap 32 has 400 boundaries and at most 399 adaptive
-  refits. Its last boundary is 12,640, so its final potentially stale tail is
-  nine rounds. Multiplier 30 makes each ETC forced-taste budget saturate at the
-  12,648-round horizon. Use the fresh
-  `boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap32-multiplier7-results`
-  directory; never reuse the completed five-multiplier gap-32 directory.
-  The optional `--include-pgts` revision-6 extension adds one faithful PG-TS
-  Algorithm-1 candidate per loss/order, with 15 every-round Pólya-Gamma Gibbs
-  transitions and a zero-mean unit-covariance Gaussian prior over the
-  row-normalized context plus intercept. It has no generic multiplier, uses
-  only action-1 feedback, uses no inverse-propensity weights, and is excluded
-  from multiplier selection. It requires the `pgts` optional dependency and a
-  fresh output directory. Always run the documented 25-round pilot before
-  considering a full 138D PG-TS study; implementation work must not launch it.
+  follow-up. The current planned revision-9 tuning study uses all 138
+  manifest-defined features and four multiplier-tuned policies: CBPSide linear
+  logistic, SquareCB.PMSide + linear logistic, SquareCB.PMSide + HGB, and
+  scheduled PG-TS Bayesian logistic. ETC HGB and ETC Linear are
+  disabled in this design. The common multiplier grid is
+  `0.1, 0.3, 1, 3, 10`, evaluated at nine `l01` values over 20 paired shuffled
+  orders. CBPSide and both SquareCB.PMSide variants make a decision every
+  round but update estimator snapshots only before pure-doubling global rounds
+  `1,2,4,8,...`, using feedback through the preceding round.
+  SquareCB.PMSide + HGB remains the nonlinear 15-leaf HGB primary;
+  SquareCB.PMSide + linear logistic is its regularized linear comparison.
+  Random is computed analytically after selection and is matched to the
+  selected SquareCB.PMSide + HGB routing rate for each loss/order.
+  Use the canonical options `--squarecb-pmside-base-gamma`,
+  `--squarecb-pmside-mu`, and `--squarecb-pmside-min-propensity`; comparison
+  artifacts use the `squarecb_pmside_tree_vs_linear` stem.
+  The full design has 3,600 candidate checkpoints, 180 execution groups and
+  candidate aggregates, and 36 pointwise multiplier selections. PG-TS accounts
+  for 900 checkpoints and 45 groups/aggregates; there are no fixed-PG-TS rows.
+  Its manifest design is exactly
+  `pointwise-online-parameter-multiplier-sweep-v9` with implementation
+  revision 9.
+
+  Finalization always records selected-policy learning curves at every online
+  round for every `l01`. Each of the four tuned policies uses its pointwise
+  selected multiplier, and analytic Random is
+  matched to selected SquareCB.PMSide + HGB traffic. Before any online-order
+  evaluation, build one fixed five-fold stratified out-of-fold HGB-15 reference
+  probability for every eligible row. Use `--reference-folds 5`, split seed
+  `--seed`, the complete
+  selected 138D context, cached weak/strong disagreement labels, and the exact
+  `ONLINE_HGB_PROFILE`. Each row's reference probability must come from a fold
+  model that did not train on that row. For loss `l01`, the reference routes
+  strong exactly when `p_oof >= 1/l01`; its row-aligned actions are fixed once
+  and only reordered with each online permutation. The reference is an offline
+  evaluation comparator and must never provide feedback or predictions to an
+  online player. Persist its row-level probabilities as float64 in
+  `cross_fitted_hgb_reference.npz` with IDs, outcomes, and fold assignments.
+
+  For binary disagreement `y_t`, realized action cost is `1` after a strong
+  route and `l01*y_t` after a weak route. The primary empirical reference-policy
+  regret is `sum_{s<=t}(cost_s-cost_s^reference)` and may be negative. Plot both
+  `selected_cumulative_reference_regret_l01-<float_slug>.{png,pdf}` and
+  `selected_average_reference_regret_l01-<float_slug>.{png,pdf}` for every
+  loss.
+  Every tuning figure with replicated-online-order uncertainty uses a fixed,
+  pointwise, two-sided 95% Student-`t` mean confidence interval. This includes
+  both learning-curve families, selected routing-rate versus accuracy, selected
+  total cost, and the separately tuned and matched tree-versus-linear cost
+  differences. The selected-multiplier plot has no uncertainty display. At
+  each plotted point let `n` be the number of trial values, `df=n-1`, and `s`
+  their sample SD; use
+  `margin=t.ppf(0.975, df)*s/sqrt(n)`, with lower/upper limits
+  `mean-margin` and `mean+margin`. Do not multiply the margin by 0.5. These are
+  pointwise bands, not simultaneous or post-selection-adjusted intervals.
+  Keep mean/SD/SEM and `online_order_repeats` in non-learning aggregate tables;
+  calculate those plot intervals at render time without adding CI columns.
+  The learning-curve CSV alone retains explicit pointwise CI bounds.
+  Retain the earlier
+  `sum_{s<=t}(cost_s-y_s)` series only under an explicit
+  `cumulative_clairvoyant_excess_cost` diagnostic name; never present it as the
+  primary regret or as evidence of a theoretical square-root rate. Save
+  compact by-order curves in `selected_learning_curves_by_order.npz` and
+  aggregate per-round mean/SD/SEM series in `selected_learning_curves.csv`,
+  along with `confidence_level`, `confidence_df`, `confidence_t_critical`, and
+  `cumulative_reference_regret_ci95_lower`,
+  `cumulative_reference_regret_ci95_upper`,
+  `average_reference_regret_ci95_lower`, and
+  `average_reference_regret_ci95_upper`; do not create a large learning-curve
+  JSON file.
+
+  All tuning figures use the centralized publication contract in
+  `src/llm_routing_simulation/plot_style.py`, including method/axis labels,
+  legend and font sizes, figure sizes, and export DPI. Figures have no titles
+  and no figure footnotes. Use the exact public method labels
+  `PG-TS (Bayesian logistic)` and `Random`. The selected-cost axes are
+  `x=$\ell_{01}$` and `y=Total cost`; cumulative-reference-regret axes are
+  visually `Round (t)` and `Regret (excess cost)`. Save every tuning figure as
+  both a vector PDF and a same-stem 400-DPI PNG. A compatible completed sweep
+  can regenerate tables and both figure formats by repeating the identical
+  command with `--plot-only`; no online policy is rerun.
+
+  `--include-pgts` adds PG-TS as the fourth multiplier-tuned policy. For every
+  `l01`, multiplier, and one of the same 20 paired orders, set
+  `effective_prior_std = --pgts-base-prior-std * multiplier`. With base prior scale
+  1 and multipliers `0.1, 0.3, 1, 3, 10`, the effective prior-standard-
+  deviation candidates are those same five values. Select the lowest-mean-
+  total-cost multiplier pointwise at each `l01`, with the common tie rule. At
+  round 1 PG-TS performs its first 15-transition Gibbs draw. At a later
+  configured estimator boundary it makes 15 complete Gibbs
+  transitions using action-1 feedback through the preceding round, but only if
+  new feedback arrived since its last posterior draw; otherwise it retains the
+  existing sample. The sampled `theta` is frozen and reused within the epoch.
+  The prior is zero-mean isotropic Gaussian; expose the base standard deviation
+  and transition count as `--pgts-base-prior-std` and `--pgts-gibbs-steps`.
+  `--pgts-prior-std` remains only a backward-compatible alias. Candidate
+  rows record `parameter_name=prior_std`, the base value, multiplier, effective
+  value, and effective `pgts_prior_std`. The random stream is determined by the
+  recorded policy seed. PG-TS uses no inverse-propensity weights. This
+  schedule-aware variant is explicitly not literal every-round Algorithm 1; it
+  is a runtime approximation. The full design has 900 selected order rows after
+  adding analytic Random and 45 selected summaries. The public figure label
+  remains exactly `PG-TS (Bayesian logistic)`.
+  The documented 25-round pilot remains available as an optional execution
+  check; implementation work must not launch the full experiment.
+
+  Preserve all earlier study artifacts as history. These include completed
+  revision-3 pure-doubling, revision-4 Fibonacci, and revision-5
+  capped-doubling gap-500/gap-100/gap-32 runs; the incomplete gap-8 attempt
+  with 3,902 of 4,500 checkpoints; and the planned gap-32 seven-multiplier
+  design. Never resume or plot an older fingerprinted directory with the
+  revision-9 configuration. Revision 8 and all earlier outputs are historical;
+  use the fresh
+  `boolq-138d-cbpside-squarecb-pmside-pgts-prior-tuned-results` directory. The
+  revision-9 design/fingerprint must reject revision-8 output directories.
 - `backup/current-combined`: recovery snapshot made before branch separation.
 
 Do not mix an experiment into another branch. Shared bug fixes should be made
