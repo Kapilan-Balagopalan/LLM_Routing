@@ -41,11 +41,13 @@ ADAPTIVE_UPDATE_SCHEDULES = ("capped-doubling", "fibonacci", "doubling")
 DEFAULT_ADAPTIVE_UPDATE_SCHEDULE = "capped-doubling"
 DEFAULT_ADAPTIVE_MAX_ROUND_GAP = 32
 TUNING_IMPLEMENTATION_REVISION = 5
+PGTS_TUNING_IMPLEMENTATION_REVISION = 6
 POLICY_CBPSIDE = "CBPSide"
 POLICY_ETC = "ETC"
 POLICY_ETC_LINEAR = "ETCLinear"
 POLICY_IGW_TREE = "IGW"
 POLICY_IGW_LINEAR = "IGWLinear"
+POLICY_PGTS = "PGTS"
 TUNED_POLICIES = (
     POLICY_CBPSIDE,
     POLICY_ETC,
@@ -53,7 +55,8 @@ TUNED_POLICIES = (
     POLICY_IGW_LINEAR,
     POLICY_IGW_TREE,
 )
-POLICY_OUTPUT_ORDER = (*TUNED_POLICIES, "Random")
+FIXED_POLICIES = (POLICY_PGTS,)
+POLICY_OUTPUT_ORDER = (*TUNED_POLICIES, *FIXED_POLICIES, "Random")
 POLICY_OUTPUT_RANK = {
     policy: index for index, policy in enumerate(POLICY_OUTPUT_ORDER)
 }
@@ -127,6 +130,28 @@ def _parser() -> argparse.ArgumentParser:
         help="Rebuild tables, selections, plots, and ZIP from complete checkpoints",
     )
 
+    parser.add_argument(
+        "--include-pgts",
+        action="store_true",
+        help=(
+            "Include the fixed PG-TS Algorithm 1 comparator. This literal "
+            "every-round Gibbs implementation is intentionally opt-in because "
+            "it is substantially more expensive and requires polyagamma."
+        ),
+    )
+    parser.add_argument(
+        "--pgts-gibbs-steps",
+        type=int,
+        default=15,
+        help="Gibbs transitions per PG-TS online decision (default: 15)",
+    )
+    parser.add_argument(
+        "--pgts-prior-std",
+        type=float,
+        default=1.0,
+        help="Isotropic zero-mean Gaussian PG-TS prior standard deviation",
+    )
+
     parser.add_argument("--cbpside-base-beta-scale", type=float, default=0.5)
     parser.add_argument("--cbpside-max-confidence-radius", type=float, default=0.5)
     parser.add_argument("--cbpside-matrix-regularization", type=float, default=1.0)
@@ -181,6 +206,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--jobs must be positive or -1")
     if args.adaptive_max_round_gap < 1:
         raise SystemExit("--adaptive-max-round-gap must be positive")
+    if args.pgts_gibbs_steps < 1:
+        raise SystemExit("--pgts-gibbs-steps must be positive")
+    if not math.isfinite(args.pgts_prior_std) or args.pgts_prior_std <= 0.0:
+        raise SystemExit("--pgts-prior-std must be positive")
     if not args.l01_values or any(
         not math.isfinite(value) or value < args.l11
         for value in args.l01_values
@@ -238,6 +267,17 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("River delta must be in (0, 1)")
     if not math.isfinite(args.river_tau) or not 0.0 <= args.river_tau <= 1.0:
         raise SystemExit("River tau must be in [0, 1]")
+
+
+def _require_pgts_dependency() -> None:
+    """Fail before a long sweep when the opt-in Gibbs dependency is absent."""
+    try:
+        __import__("polyagamma")
+    except ImportError as exc:
+        raise SystemExit(
+            "PG-TS requires its optional dependency. Install it with "
+            "python -m pip install -e \".[test,pgts]\", or omit --include-pgts."
+        ) from exc
 
 
 def _schedule_boundaries(
@@ -402,6 +442,8 @@ def make_tree_backend(
 def _method_label(policy: str, tree_settings: dict[str, Any]) -> str:
     if policy == POLICY_CBPSIDE:
         return "CBPSide (linear logistic)"
+    if policy == POLICY_PGTS:
+        return "PG-TS (Bayesian logistic)"
     if policy == POLICY_ETC_LINEAR:
         return "ETC + linear logistic"
     if policy == POLICY_IGW_LINEAR:
@@ -420,10 +462,10 @@ def _base_row(
     policy: str,
     l01: float,
     l11: float,
-    multiplier: float,
+    multiplier: float | None,
     parameter_name: str,
-    base_parameter: float,
-    effective_parameter: float,
+    base_parameter: float | None,
+    effective_parameter: float | None,
     order_index: int,
     order_seed: int,
     policy_seed: int,
@@ -437,10 +479,14 @@ def _base_row(
         "l01": float(l01),
         "l11": float(l11),
         "alpha": float(1.0 / (1.0 + l01 - l11)),
-        "multiplier": float(multiplier),
+        "multiplier": None if multiplier is None else float(multiplier),
         "parameter_name": parameter_name,
-        "base_parameter": float(base_parameter),
-        "effective_parameter": float(effective_parameter),
+        "base_parameter": (
+            None if base_parameter is None else float(base_parameter)
+        ),
+        "effective_parameter": (
+            None if effective_parameter is None else float(effective_parameter)
+        ),
         "order_run": order_index + 1,
         "order_seed": int(order_seed),
         "policy_seed": int(policy_seed),
@@ -448,9 +494,14 @@ def _base_row(
         "examples": int(examples),
         "update_schedule": update_schedule,
         "probability_estimator": (
-            "linear-logistic"
-            if policy in {POLICY_CBPSIDE, POLICY_ETC_LINEAR, POLICY_IGW_LINEAR}
-            else tree_settings["kind"]
+            "bayesian-logistic-polya-gamma-gibbs"
+            if policy == POLICY_PGTS
+            else (
+                "linear-logistic"
+                if policy
+                in {POLICY_CBPSIDE, POLICY_ETC_LINEAR, POLICY_IGW_LINEAR}
+                else tree_settings["kind"]
+            )
         ),
         "tree_estimator": (
             tree_settings["kind"]
@@ -488,6 +539,101 @@ def _finish_row(
         )
     )
     return row
+
+
+def _simulate_pgts_candidate(
+    normalized_features: np.ndarray,
+    outcomes: np.ndarray,
+    permutation: np.ndarray,
+    *,
+    l01: float,
+    l11: float,
+    gibbs_steps: int,
+    prior_std: float,
+    order_index: int,
+    order_seed: int,
+    policy_seed: int,
+) -> dict[str, Any]:
+    """Run literal every-round PG-TS with action-1-only feedback."""
+    # Keep the optional dependency out of legacy tuner imports and executions.
+    from llm_routing_simulation.pgts import PolyaGammaThompsonSampler
+
+    x_all = normalized_features[permutation]
+    y_all = outcomes[permutation]
+    n, dimension = x_all.shape
+    sampler = PolyaGammaThompsonSampler(
+        dimension,
+        gibbs_steps=gibbs_steps,
+        prior_std=prior_std,
+        seed=policy_seed,
+    )
+    revealed_x = np.empty((n, dimension), dtype=np.float64)
+    revealed_y = np.empty(n, dtype=np.int8)
+    revealed_count = 0
+    routed = 0
+    correct = 0
+
+    try:
+        for context, outcome in zip(x_all, y_all):
+            # Algorithm 1 draws a new final Gibbs state on every online round,
+            # even when the action-0 round leaves the revealed history unchanged.
+            theta = sampler.draw_theta(
+                revealed_x[:revealed_count], revealed_y[:revealed_count]
+            )
+            probability = float(LogCBPSideAT.sigmoid(context @ theta))
+            loss_0 = l01 * probability
+            loss_1 = 1.0 + (l11 - 1.0) * probability
+            action = int(loss_1 <= loss_0)
+            routed += action
+            correct += int(action == 1 or outcome == 0)
+            if action == 1:
+                revealed_x[revealed_count] = context
+                revealed_y[revealed_count] = outcome
+                revealed_count += 1
+    except ImportError as exc:
+        raise RuntimeError(
+            "PG-TS requires its optional dependency. Install it with "
+            "python -m pip install -e \".[test,pgts]\", or rerun without "
+            "--include-pgts."
+        ) from exc
+
+    row = _base_row(
+        policy=POLICY_PGTS,
+        l01=l01,
+        l11=l11,
+        multiplier=None,
+        parameter_name="gibbs_steps",
+        base_parameter=float(gibbs_steps),
+        effective_parameter=float(gibbs_steps),
+        order_index=order_index,
+        order_seed=order_seed,
+        policy_seed=policy_seed,
+        examples=n,
+        tree_settings={},
+        update_schedule="literal_every_round_gibbs",
+    )
+    row.update(
+        {
+            "pgts_gibbs_steps": int(gibbs_steps),
+            "pgts_prior_mean": 0.0,
+            "pgts_prior_std": float(prior_std),
+            "pgts_context_preprocessing": (
+                "row_l2_normalized_with_max_one_denominator_then_intercept"
+            ),
+            "pgts_posterior_draw": "final_draw_after_M_gibbs_transitions",
+            "feedback_protocol": "action_1_only_binary_disagreement",
+            "inverse_propensity_weighting": False,
+            "posterior_draw_rounds": int(n),
+            "total_gibbs_transitions": int(n * gibbs_steps),
+        }
+    )
+    return _finish_row(
+        row,
+        routed=routed,
+        correct=correct,
+        model_updates=n,
+        last_training_count=revealed_count,
+    )
 
 
 def _simulate_cbpside_candidate(
@@ -896,15 +1042,18 @@ def _checkpoint_path(
     output: Path,
     policy: str,
     l01: float,
-    multiplier: float,
+    multiplier: float | None,
     order_index: int,
 ) -> Path:
+    parameter_directory = (
+        "fixed" if multiplier is None else f"multiplier-{_float_slug(multiplier)}"
+    )
     return (
         output
         / "checkpoints"
         / policy.lower()
         / f"l01-{_float_slug(l01)}"
-        / f"multiplier-{_float_slug(multiplier)}"
+        / parameter_directory
         / f"order-{order_index + 1:02d}.json"
     )
 
@@ -934,13 +1083,16 @@ def _save_checkpoint(path: Path, row: dict[str, Any], fingerprint: str) -> None:
 
 
 def _aggregate_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    groups: dict[tuple[str, float, float, float], list[dict[str, Any]]] = {}
+    groups: dict[
+        tuple[str, float, float, float | None], list[dict[str, Any]]
+    ] = {}
     for row in rows:
+        multiplier = row.get("multiplier")
         key = (
             str(row["policy"]),
             float(row["l01"]),
             float(row["l11"]),
-            float(row["multiplier"]),
+            None if multiplier is None else float(multiplier),
         )
         groups.setdefault(key, []).append(row)
 
@@ -950,7 +1102,7 @@ def _aggregate_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         key=lambda item: (
             POLICY_OUTPUT_RANK.get(item[0], len(POLICY_OUTPUT_RANK)),
             item[1],
-            item[3],
+            math.inf if item[3] is None else item[3],
         ),
     ):
         group = sorted(groups[key], key=lambda row: int(row["order_run"]))
@@ -992,6 +1144,8 @@ def _select_pointwise_multipliers(
 ) -> list[dict[str, Any]]:
     groups: dict[tuple[str, float, float], list[dict[str, Any]]] = {}
     for row in candidate_aggregates:
+        if row["policy"] not in TUNED_POLICIES:
+            continue
         key = (str(row["policy"]), float(row["l01"]), float(row["l11"]))
         groups.setdefault(key, []).append(row)
 
@@ -1055,7 +1209,13 @@ def _selected_order_rows(
     selected: list[dict[str, Any]] = []
     for row in candidate_rows:
         key = (str(row["policy"]), float(row["l01"]), float(row["l11"]))
-        if float(row["multiplier"]) == lookup[key]:
+        if row["policy"] in FIXED_POLICIES:
+            copied = dict(row)
+            copied["selected_multiplier"] = None
+            copied["selection_evaluation_reuse"] = False
+            copied["selection_rule"] = "fixed comparator; no multiplier selection"
+            selected.append(copied)
+        elif key in lookup and float(row["multiplier"]) == lookup[key]:
             copied = dict(row)
             copied["selected_multiplier"] = float(row["multiplier"])
             copied["selection_evaluation_reuse"] = True
@@ -1397,9 +1557,14 @@ def _plot_selected_routing_accuracy(
     axis.set_xlabel("Strong-model routing rate")
     axis.set_ylabel("Agreement with cached strong-model reference")
     repeats = int(rows[0]["online_order_repeats"])
+    includes_pgts = any(row["policy"] == POLICY_PGTS for row in rows)
+    title = (
+        "Selected and fixed routing policies: routing rate versus accuracy"
+        if includes_pgts
+        else "Pointwise multiplier-selected routing rate versus accuracy"
+    )
     axis.set_title(
-        "Pointwise multiplier-selected routing rate versus accuracy\n"
-        f"Mean +/- 1 SD across {repeats} paired shuffled orders"
+        f"{title}\nMean +/- 1 SD across {repeats} paired shuffled orders"
     )
     axis.grid(alpha=0.25)
     axis.legend(fontsize=8)
@@ -1434,9 +1599,14 @@ def _plot_selected_cost(path: Path, rows: list[dict[str, Any]]) -> None:
         f"Total cost over {int(rows[0]['examples']):,} online samples"
     )
     repeats = int(rows[0]["online_order_repeats"])
+    includes_pgts = any(row["policy"] == POLICY_PGTS for row in rows)
+    title = (
+        "Selected and fixed policies: total cost"
+        if includes_pgts
+        else "Pointwise multiplier-selected total cost"
+    )
     axis.set_title(
-        "Pointwise multiplier-selected total cost "
-        "(learned policies realized; Random expected)\n"
+        f"{title} (learned policies realized; Random expected)\n"
         f"Mean +/- 1 SD across {repeats} paired shuffled orders"
     )
     axis.grid(alpha=0.25)
@@ -1450,7 +1620,12 @@ def _plot_selected_cost(path: Path, rows: list[dict[str, Any]]) -> None:
     figure.text(
         0.5,
         0.005,
-        relation + "; exploratory oracle selection uses these same orders",
+        relation
+        + (
+            "; tuned-policy multiplier selection uses these same orders"
+            if includes_pgts
+            else "; exploratory oracle selection uses these same orders"
+        ),
         ha="center",
         fontsize=9,
     )
@@ -1638,8 +1813,16 @@ def _manifest_and_fingerprint(
     else:
         boundary_rule = "before global rounds 1,2,4,8,..."
     manifest = {
-        "design": "pointwise-online-parameter-multiplier-sweep-v5",
-        "implementation_revision": TUNING_IMPLEMENTATION_REVISION,
+        "design": (
+            "pointwise-online-parameter-multiplier-sweep-v6"
+            if args.include_pgts
+            else "pointwise-online-parameter-multiplier-sweep-v5"
+        ),
+        "implementation_revision": (
+            PGTS_TUNING_IMPLEMENTATION_REVISION
+            if args.include_pgts
+            else TUNING_IMPLEMENTATION_REVISION
+        ),
         "cache": str(args.cache.resolve()),
         "examples": int(n),
         "context_dimension": int(contexts.shape[1]),
@@ -1792,6 +1975,65 @@ def _manifest_and_fingerprint(
         ),
         "data_identity_sha256": identity.hexdigest(),
     }
+    if args.include_pgts:
+        manifest.update(
+            {
+                "fixed_policies": [POLICY_PGTS],
+                "candidate_policies": [*TUNED_POLICIES, POLICY_PGTS],
+                "candidate_counts": {
+                    "multiplier_tuned_checkpoints": (
+                        len(TUNED_POLICIES)
+                        * len(args.l01_values)
+                        * len(args.multipliers)
+                        * args.online_order_repeats
+                    ),
+                    "fixed_pgts_checkpoints": (
+                        len(args.l01_values) * args.online_order_repeats
+                    ),
+                    "total_checkpoints": _expected_checkpoint_count(args),
+                    "multiplier_tuned_execution_groups": (
+                        len(args.multipliers)
+                        * (2 + 3 * len(args.l01_values))
+                    ),
+                    "fixed_pgts_execution_groups": len(args.l01_values),
+                    "total_execution_groups": (
+                        len(args.multipliers)
+                        * (2 + 3 * len(args.l01_values))
+                        + len(args.l01_values)
+                    ),
+                },
+                "pgts": {
+                    "enabled": True,
+                    "policy": POLICY_PGTS,
+                    "algorithm": "PG-TS Algorithm 1",
+                    "gibbs_steps_per_round": int(args.pgts_gibbs_steps),
+                    "prior_mean": 0.0,
+                    "prior_std": float(args.pgts_prior_std),
+                    "prior_covariance": "prior_std^2 * identity",
+                    "context_preprocessing": (
+                        "row L2 normalization using max(1, norm), then prepend "
+                        "intercept"
+                    ),
+                    "posterior_draw": "final draw after M Gibbs transitions",
+                    "update_schedule": "every online round",
+                    "feedback": (
+                        "only action-1 disagreement outcomes are revealed"
+                    ),
+                    "inverse_propensity_weighting": False,
+                    "multiplier_tuned": False,
+                    "optional_dependency": "polyagamma",
+                },
+            }
+        )
+        manifest["update_schedule"]["pgts"] = (
+            "literal Gibbs posterior draw before every online action"
+        )
+        manifest["selection"].update(
+            {
+                "policies": list(TUNED_POLICIES),
+                "fixed_policies_excluded": [POLICY_PGTS],
+            }
+        )
     encoded = json.dumps(_jsonable(manifest), sort_keys=True).encode("utf-8")
     fingerprint = hashlib.sha256(encoded).hexdigest()
     manifest["config_fingerprint"] = fingerprint
@@ -1825,14 +2067,21 @@ def _expected_checkpoint_count(args: argparse.Namespace) -> int:
         * len(args.multipliers)
         * args.online_order_repeats
     )
-    return len(TUNED_POLICIES) * candidates_per_policy
+    fixed_candidates = (
+        len(args.l01_values) * args.online_order_repeats
+        if args.include_pgts
+        else 0
+    )
+    return len(TUNED_POLICIES) * candidates_per_policy + fixed_candidates
 
 
 def _load_all_expected_checkpoints(
     output: Path, args: argparse.Namespace, fingerprint: str
-) -> tuple[list[dict[str, Any]], list[tuple[str, float, float, int]]]:
+) -> tuple[
+    list[dict[str, Any]], list[tuple[str, float, float | None, int]]
+]:
     rows: list[dict[str, Any]] = []
-    missing: list[tuple[str, float, float, int]] = []
+    missing: list[tuple[str, float, float | None, int]] = []
     for policy in TUNED_POLICIES:
         for l01 in args.l01_values:
             for multiplier in args.multipliers:
@@ -1845,6 +2094,17 @@ def _load_all_expected_checkpoints(
                         missing.append((policy, l01, multiplier, order_index))
                     else:
                         rows.append(row)
+    if args.include_pgts:
+        for l01 in args.l01_values:
+            for order_index in range(args.online_order_repeats):
+                path = _checkpoint_path(
+                    output, POLICY_PGTS, l01, None, order_index
+                )
+                row = _load_checkpoint(path, fingerprint)
+                if row is None:
+                    missing.append((POLICY_PGTS, l01, None, order_index))
+                else:
+                    rows.append(row)
     return rows, missing
 
 
@@ -1865,7 +2125,7 @@ def _run_sweep(
     linear_settings = _linear_settings()
     total_candidate_groups = len(args.multipliers) * (
         2 + 3 * len(args.l01_values)
-    )
+    ) + (len(args.l01_values) if args.include_pgts else 0)
     group_number = 0
 
     # Each feasible ETC estimator is fit once per order/multiplier; its frozen
@@ -1925,6 +2185,51 @@ def _run_sweep(
                         int(row["order_run"]) - 1,
                     )
                     _save_checkpoint(path, row, fingerprint)
+
+    # PG-TS has no multiplier. Each loss/order is one fixed comparator
+    # trajectory because the loss changes its actions and revealed history.
+    if args.include_pgts:
+        for l01 in args.l01_values:
+            group_number += 1
+            missing_orders = []
+            for order_index in range(args.online_order_repeats):
+                path = _checkpoint_path(
+                    output, POLICY_PGTS, l01, None, order_index
+                )
+                if _load_checkpoint(path, fingerprint) is None:
+                    missing_orders.append(order_index)
+            print(
+                f"[{group_number}/{total_candidate_groups}] "
+                f"{_method_label(POLICY_PGTS, {})} l01={l01:g}; "
+                f"{len(missing_orders)} order run(s) remaining",
+                flush=True,
+            )
+            tasks = [
+                {
+                    "normalized_features": normalized_features,
+                    "outcomes": outcomes,
+                    "permutation": permutations[order_index],
+                    "l01": l01,
+                    "l11": args.l11,
+                    "gibbs_steps": args.pgts_gibbs_steps,
+                    "prior_std": args.pgts_prior_std,
+                    "order_index": order_index,
+                    "order_seed": args.seed + order_index,
+                    "policy_seed": args.policy_seed,
+                }
+                for order_index in missing_orders
+            ]
+            for row in _parallel_map(
+                _simulate_pgts_candidate, tasks, args.jobs
+            ):
+                path = _checkpoint_path(
+                    output,
+                    POLICY_PGTS,
+                    l01,
+                    None,
+                    int(row["order_run"]) - 1,
+                )
+                _save_checkpoint(path, row, fingerprint)
 
     for policy in (POLICY_CBPSIDE, POLICY_IGW_LINEAR, POLICY_IGW_TREE):
         for l01 in args.l01_values:
@@ -2031,7 +2336,11 @@ def _write_final_outputs(
                 str(row["policy"]), len(POLICY_OUTPUT_RANK)
             ),
             float(row["l01"]),
-            float(row["multiplier"]),
+            (
+                math.inf
+                if row.get("multiplier") is None
+                else float(row["multiplier"])
+            ),
             int(row["order_run"]),
         )
     )
@@ -2122,6 +2431,25 @@ def _write_final_outputs(
             else "alpha = 1/(1+l01-l11)"
         ),
     }
+    if args.include_pgts:
+        summary.update(
+            {
+                "fixed_policy_checkpoint_count": (
+                    len(args.l01_values) * args.online_order_repeats
+                ),
+                "fixed_policies": [POLICY_PGTS],
+                "important_interpretation": (
+                    f"For {len(TUNED_POLICIES)} multiplier-tuned policies, each "
+                    f"selected point is the best of {len(args.multipliers)} "
+                    f"multipliers on these same {args.online_order_repeats} "
+                    "orders, so those curves are exploratory optimistic oracle "
+                    "envelopes. PG-TS is a fixed comparator with no multiplier "
+                    "selection, and Random remains analytically matched only to "
+                    "selected ETC HGB traffic. The matched-gamma IGW comparison "
+                    "retains every multiplier without selecting a winner."
+                ),
+            }
+        )
     _atomic_write_json(output / "summary.json", summary)
     return _bundle(output)
 
@@ -2129,6 +2457,8 @@ def _write_final_outputs(
 def main(argv: Iterable[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     _validate_args(args)
+    if args.include_pgts and not args.plot_only:
+        _require_pgts_dependency()
     cache = load_cache(args.cache)
     rounds, context_summary, _, _ = _prompt_context_rounds(
         cache,
@@ -2183,10 +2513,17 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     base_gamma = float(manifest["base_parameters"]["igw_gamma"])
     base_tastes = float(manifest["base_parameters"]["etc_tastes"])
+    pgts_status = (
+        f"PG-TS=fixed M={args.pgts_gibbs_steps}, "
+        f"prior_std={args.pgts_prior_std:g}; "
+        if args.include_pgts
+        else ""
+    )
     print(
         f"Loaded {len(rounds):,} eligible rows with {contexts.shape[1]} features. "
         f"IGW Tree={args.tree_estimator}; IGW Linear=enabled; "
         f"ETC HGB leaves={args.hgb_max_leaf_nodes}; ETC Linear=enabled; "
+        f"{pgts_status}"
         "adaptive schedule="
         f"{_schedule_slug(args.adaptive_update_schedule, args.adaptive_max_round_gap)}; "
         f"{args.online_order_repeats} paired orders; "

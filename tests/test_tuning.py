@@ -568,6 +568,54 @@ def test_etc_records_the_infeasible_prefix_prevalence_fallback(
     assert row["routing_rate"] == 0.5
 
 
+def test_pgts_candidate_draws_every_round_from_action_one_history(monkeypatch):
+    import llm_routing_simulation.pgts as pgts
+
+    histories = []
+
+    class FakeSampler:
+        def __init__(self, dimension, *, gibbs_steps, prior_std, seed):
+            assert dimension == 2
+            assert gibbs_steps == 15
+            assert prior_std == 1.0
+            assert seed == 7
+
+        def draw_theta(self, features, outcomes):
+            histories.append(
+                (np.asarray(features).copy(), np.asarray(outcomes).copy())
+            )
+            return np.asarray([0.0, 10.0])
+
+    monkeypatch.setattr(pgts, "PolyaGammaThompsonSampler", FakeSampler)
+    features = np.asarray([[1.0, -1.0], [1.0, 1.0], [1.0, -1.0]])
+    outcomes = np.asarray([1, 1, 0], dtype=np.int8)
+
+    row = tuning._simulate_pgts_candidate(
+        features,
+        outcomes,
+        np.arange(3),
+        l01=2.0,
+        l11=1.0,
+        gibbs_steps=15,
+        prior_std=1.0,
+        order_index=0,
+        order_seed=3,
+        policy_seed=7,
+    )
+
+    assert [len(labels) for _, labels in histories] == [0, 0, 1]
+    assert histories[-1][1].tolist() == [1]
+    assert histories[-1][0].tolist() == [[1.0, 1.0]]
+    assert row["policy"] == tuning.POLICY_PGTS
+    assert row["multiplier"] is None
+    assert row["parameter_name"] == "gibbs_steps"
+    assert row["routing_rate"] == pytest.approx(1.0 / 3.0)
+    assert row["accuracy"] == pytest.approx(2.0 / 3.0)
+    assert row["model_updates"] == 3
+    assert row["last_model_training_count"] == 1
+    assert row["total_gibbs_transitions"] == 45
+
+
 def test_candidate_selection_is_pointwise_and_uses_deterministic_tie_break():
     candidates = []
     for policy in tuning.TUNED_POLICIES:
@@ -761,7 +809,12 @@ def test_parser_keeps_established_hgb_as_explicit_default():
     }
     assert args.online_order_repeats == 20
     assert args.multipliers == [0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0]
+    assert args.include_pgts is False
+    assert args.pgts_gibbs_steps == 15
+    assert args.pgts_prior_std == 1.0
     assert tuning._expected_checkpoint_count(args) == 6300
+    pgts_args = tuning._parser().parse_args(base + ["--include-pgts"])
+    assert tuning._expected_checkpoint_count(pgts_args) == 6480
 
 
 def test_manifest_fingerprint_covers_contexts_and_cbpside_regularization(tmp_path):
@@ -820,10 +873,25 @@ def test_manifest_fingerprint_covers_contexts_and_cbpside_regularization(tmp_pat
     short_gap_manifest, short_gap_fingerprint = (
         tuning._manifest_and_fingerprint(short_gap_args, **common)
     )
+    pgts_args = tuning._parser().parse_args(
+        base
+        + [
+            "--include-pgts",
+            "--pgts-gibbs-steps",
+            "7",
+            "--pgts-prior-std",
+            "2",
+        ]
+    )
+    pgts_manifest, pgts_fingerprint = tuning._manifest_and_fingerprint(
+        pgts_args, **common
+    )
 
     assert manifest["design"] == "pointwise-online-parameter-multiplier-sweep-v5"
     assert manifest["implementation_revision"] == 5
     assert manifest["tuned_policies"] == list(tuning.TUNED_POLICIES)
+    assert "pgts" not in manifest
+    assert "fixed_policies" not in manifest
     assert manifest["update_schedule"] == {
         "name": "capped-doubling",
         "maximum_round_gap": 32,
@@ -885,6 +953,40 @@ def test_manifest_fingerprint_covers_contexts_and_cbpside_regularization(tmp_pat
     assert "selected_contrast" in manifest["igw_estimator_comparison"]
     assert manifest["base_parameters"]["cbpside_matrix_regularization"] == 1.0
     assert manifest["base_parameters"]["cbpside_theta_regularization"] == 1.0
+    assert pgts_manifest["design"] == (
+        "pointwise-online-parameter-multiplier-sweep-v6"
+    )
+    assert pgts_manifest["implementation_revision"] == 6
+    assert pgts_manifest["fixed_policies"] == [tuning.POLICY_PGTS]
+    assert pgts_manifest["pgts"] == {
+        "enabled": True,
+        "policy": tuning.POLICY_PGTS,
+        "algorithm": "PG-TS Algorithm 1",
+        "gibbs_steps_per_round": 7,
+        "prior_mean": 0.0,
+        "prior_std": 2.0,
+        "prior_covariance": "prior_std^2 * identity",
+        "context_preprocessing": (
+            "row L2 normalization using max(1, norm), then prepend intercept"
+        ),
+        "posterior_draw": "final draw after M Gibbs transitions",
+        "update_schedule": "every online round",
+        "feedback": "only action-1 disagreement outcomes are revealed",
+        "inverse_propensity_weighting": False,
+        "multiplier_tuned": False,
+        "optional_dependency": "polyagamma",
+    }
+    assert pgts_manifest["candidate_counts"] == {
+        "multiplier_tuned_checkpoints": 6300,
+        "fixed_pgts_checkpoints": 180,
+        "total_checkpoints": 6480,
+        "multiplier_tuned_execution_groups": 203,
+        "fixed_pgts_execution_groups": 9,
+        "total_execution_groups": 212,
+    }
+    assert pgts_manifest["selection"]["fixed_policies_excluded"] == [
+        tuning.POLICY_PGTS
+    ]
     assert len(
         {
             default_fingerprint,
@@ -894,8 +996,9 @@ def test_manifest_fingerprint_covers_contexts_and_cbpside_regularization(tmp_pat
             fibonacci_fingerprint,
             doubling_fingerprint,
             short_gap_fingerprint,
+            pgts_fingerprint,
         }
-    ) == 7
+    ) == 8
 
 
 def test_tuner_rejects_a_nonunit_strong_route_cost():
@@ -928,6 +1031,54 @@ def test_tuner_rejects_a_nonpositive_adaptive_maximum_gap():
 
     with pytest.raises(SystemExit, match="adaptive-max-round-gap must be positive"):
         tuning._validate_args(args)
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("--pgts-gibbs-steps", "0", "pgts-gibbs-steps must be positive"),
+        ("--pgts-prior-std", "0", "pgts-prior-std must be positive"),
+    ],
+)
+def test_tuner_rejects_invalid_pgts_settings(option, value, message):
+    args = tuning._parser().parse_args(
+        [
+            "--cache",
+            "cache.zip",
+            "--output-dir",
+            "results",
+            option,
+            value,
+        ]
+    )
+
+    with pytest.raises(SystemExit, match=message):
+        tuning._validate_args(args)
+
+
+def test_pgts_dependency_preflight_happens_before_cache_loading(
+    monkeypatch, tmp_path
+):
+    def unavailable():
+        raise SystemExit("missing optional PG-TS dependency")
+
+    def unexpected_cache_load(path):
+        del path
+        raise AssertionError("cache loading must follow dependency preflight")
+
+    monkeypatch.setattr(tuning, "_require_pgts_dependency", unavailable)
+    monkeypatch.setattr(tuning, "load_cache", unexpected_cache_load)
+
+    with pytest.raises(SystemExit, match="missing optional PG-TS dependency"):
+        tuning.main(
+            [
+                "--cache",
+                str(tmp_path / "cache.zip"),
+                "--output-dir",
+                str(tmp_path / "results"),
+                "--include-pgts",
+            ]
+        )
 
 
 def test_small_end_to_end_sweep_resumes_and_plot_only_uses_checkpoints(
@@ -974,6 +1125,57 @@ def test_small_end_to_end_sweep_resumes_and_plot_only_uses_checkpoints(
         return backend
 
     monkeypatch.setattr(tuning, "make_tree_backend", factory)
+    pgts_calls = []
+
+    def fake_pgts_candidate(
+        normalized_features,
+        outcomes,
+        permutation,
+        *,
+        l01,
+        l11,
+        gibbs_steps,
+        prior_std,
+        order_index,
+        order_seed,
+        policy_seed,
+    ):
+        pgts_calls.append((float(l01), int(order_index)))
+        y_all = outcomes[permutation]
+        n = len(y_all)
+        actions = np.arange(n) % 2 == 0
+        row = tuning._base_row(
+            policy=tuning.POLICY_PGTS,
+            l01=l01,
+            l11=l11,
+            multiplier=None,
+            parameter_name="gibbs_steps",
+            base_parameter=gibbs_steps,
+            effective_parameter=gibbs_steps,
+            order_index=order_index,
+            order_seed=order_seed,
+            policy_seed=policy_seed,
+            examples=n,
+            tree_settings={},
+            update_schedule="literal_every_round_gibbs",
+        )
+        row.update(
+            {
+                "pgts_gibbs_steps": int(gibbs_steps),
+                "pgts_prior_std": float(prior_std),
+                "normalized_dimension": int(normalized_features.shape[1]),
+            }
+        )
+        return tuning._finish_row(
+            row,
+            routed=int(np.count_nonzero(actions)),
+            correct=int(np.count_nonzero(actions | (y_all == 0))),
+            model_updates=n,
+            last_training_count=int(np.count_nonzero(actions)),
+        )
+
+    monkeypatch.setattr(tuning, "_require_pgts_dependency", lambda: None)
+    monkeypatch.setattr(tuning, "_simulate_pgts_candidate", fake_pgts_candidate)
     output = tmp_path / "sweep"
     arguments = [
         "--cache",
@@ -988,11 +1190,12 @@ def test_small_end_to_end_sweep_resumes_and_plot_only_uses_checkpoints(
         "2",
         "--tree-estimator",
         "river-hoeffding",
+        "--include-pgts",
     ]
 
     assert tuning.main(arguments) == 0
     checkpoints = list((output / "checkpoints").rglob("*.json"))
-    assert len(checkpoints) == 10
+    assert len(checkpoints) == 12
     checkpoint_policies = {
         path.relative_to(output / "checkpoints").parts[0] for path in checkpoints
     }
@@ -1002,6 +1205,7 @@ def test_small_end_to_end_sweep_resumes_and_plot_only_uses_checkpoints(
         "etclinear",
         "igwlinear",
         "igw",
+        "pgts",
     }
     manifest = json.loads(
         (output / "sweep_manifest.json").read_text(encoding="utf-8")
@@ -1010,14 +1214,30 @@ def test_small_end_to_end_sweep_resumes_and_plot_only_uses_checkpoints(
     assert manifest["update_schedule"]["maximum_round_gap"] == 32
     assert manifest["update_schedule"]["boundary_rounds"] == [1, 2, 4, 8]
     assert manifest["tuned_policies"] == list(tuning.TUNED_POLICIES)
+    assert manifest["fixed_policies"] == [tuning.POLICY_PGTS]
+    assert manifest["candidate_counts"] == {
+        "multiplier_tuned_checkpoints": 10,
+        "fixed_pgts_checkpoints": 2,
+        "total_checkpoints": 12,
+        "multiplier_tuned_execution_groups": 5,
+        "fixed_pgts_execution_groups": 1,
+        "total_execution_groups": 6,
+    }
     candidate_rows = json.loads(
         (output / "candidate_results_by_order.json").read_text(encoding="utf-8")
     )
-    assert len(candidate_rows) == 10
+    assert len(candidate_rows) == 12
     assert {
         policy: sum(row["policy"] == policy for row in candidate_rows)
         for policy in tuning.TUNED_POLICIES
     } == {policy: 2 for policy in tuning.TUNED_POLICIES}
+    pgts_rows = [
+        row for row in candidate_rows if row["policy"] == tuning.POLICY_PGTS
+    ]
+    assert len(pgts_rows) == 2
+    assert all(row["multiplier"] is None for row in pgts_rows)
+    assert all(row["pgts_gibbs_steps"] == 15 for row in pgts_rows)
+    assert all(row["normalized_dimension"] == 3 for row in pgts_rows)
     for policy in (tuning.POLICY_ETC, tuning.POLICY_ETC_LINEAR):
         rows = [row for row in candidate_rows if row["policy"] == policy]
         assert all(
@@ -1040,8 +1260,18 @@ def test_small_end_to_end_sweep_resumes_and_plot_only_uses_checkpoints(
     )
     assert [row["policy"] for row in selected] == [
         *tuning.TUNED_POLICIES,
+        tuning.POLICY_PGTS,
         "Random",
     ]
+    selected_multipliers = json.loads(
+        (output / "selected_multipliers.json").read_text(encoding="utf-8")
+    )
+    assert {row["policy"] for row in selected_multipliers} == set(
+        tuning.TUNED_POLICIES
+    )
+    assert all(
+        row["policy"] != tuning.POLICY_PGTS for row in selected_multipliers
+    )
     selected_by_order = json.loads(
         (output / "selected_results_by_order.json").read_text(encoding="utf-8")
     )
@@ -1066,7 +1296,10 @@ def test_small_end_to_end_sweep_resumes_and_plot_only_uses_checkpoints(
     assert (output / "multiplier-sweep-results.zip").stat().st_size > 0
 
     created_count = len(created_backends)
+    pgts_call_count = len(pgts_calls)
     assert tuning.main(arguments) == 0
     assert len(created_backends) == created_count
+    assert len(pgts_calls) == pgts_call_count
     assert tuning.main(arguments + ["--plot-only"]) == 0
     assert len(created_backends) == created_count
+    assert len(pgts_calls) == pgts_call_count

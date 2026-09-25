@@ -1428,6 +1428,100 @@ Repeat the exact command above to resume the new study; after all 6,300
 checkpoints exist, add `--plot-only` with every other scientific option
 unchanged to rebuild its final tables and figures.
 
+### Optional faithful PG-TS Algorithm 1 comparator, 2026-09-24
+
+Branch: `experiment/boolq-cbpside-beta1`
+
+Status: implemented as an opt-in revision-6 extension; no PG-TS experiment was
+run and no numerical conclusion is recorded. The no-PG-TS command retains the
+revision-5 manifest and fingerprint so the existing completed and resumable
+artifacts remain compatible.
+
+PG-TS follows Algorithm 1 and Appendix D of *Apple Tasting Revisited: Bayesian
+Approaches to Partially Monitored Online Binary Classification* (arXiv
+2109.14412). For the revealed-history matrix `X`, binary disagreement labels
+`y`, `kappa=y-1/2`, and prior `theta ~ N(0, tau^2 I)`, every Gibbs transition
+draws
+
+```text
+omega_i ~ PG(1, x_i^T theta)
+V = (X^T Omega X + tau^(-2) I)^(-1)
+m = V X^T kappa
+theta ~ N(m, V)
+```
+
+The implementation uses precision-Cholesky solves rather than explicitly
+forming `V`. It interprets the paper's `B` as the prior covariance, consistent
+with Algorithm 1 and the `B^-1` terms in Appendix D. The executable Appendix-D
+Gaussian is used without an invented truncation step.
+
+Agreed initial settings and routing mapping:
+
+- PG-TS is enabled only with `--include-pgts` and requires the optional
+  `polyagamma` dependency;
+- the fixed prior is zero-mean isotropic Gaussian with `tau=1`;
+- the default is `M=15` complete Gibbs transitions per online round, using the
+  final draw only and warm-starting from the preceding final draw;
+- the 138D context is row-L2-normalized with denominator `max(1, ||x||)`, then
+  an intercept is prepended, giving a 139D Bayesian logistic parameter;
+- with `l11=1`, action 1 is selected on an exact tie and otherwise exactly when
+  the sampled disagreement probability is at least `1/l01`;
+- only action-1 rounds reveal and append cached weak/strong disagreement. There
+  is no inverse-propensity weighting and BoolQ gold labels are never used;
+- PG-TS runs fresh Gibbs transitions on every round, including after an action-0
+  round. It does not use capped-doubling boundaries; applying that schedule
+  would be a separately labeled approximation rather than Algorithm 1;
+- PG-TS has no generic multiplier `m`. It contributes one fixed candidate for
+  each loss/order, is excluded from multiplier selection, and is included
+  directly in selected routing/cost tables and figures.
+
+With nine losses and 20 orders, PG-TS adds 180 checkpoints. The enabled design
+therefore has 6,480 candidate rows, 324 candidate aggregates, 45 multiplier
+selections for the original five tuned policies, 1,260 selected order rows
+after adding Random, 63 selected summaries, and 212 execution groups. Random
+remains matched only to selected ETC HGB traffic.
+
+First install the optional dependency and run only this execution/timing pilot:
+
+```powershell
+.\.routing-venv\Scripts\python.exe -m pip install -e ".[test,pgts]"
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-pgts-algorithm1-pilot `
+  --context-profile all-features `
+  --limit 25 `
+  --l01-values 2.6 `
+  --multipliers 1 `
+  --online-order-repeats 2 `
+  --adaptive-update-schedule capped-doubling `
+  --adaptive-max-round-gap 32 `
+  --include-pgts `
+  --pgts-gibbs-steps 15 `
+  --pgts-prior-std 1 `
+  --jobs 1 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+This pilot is not a research result. Before any full run, use its measured
+runtime to decide whether literal Algorithm 1 is practical. Its cost grows
+steeply because every transition resamples all revealed Pólya-Gamma variables
+and solves a roughly 139-dimensional Gaussian system. No incremental rank-one
+update can replace that calculation because every latent `omega_i` changes at
+each transition.
+
+If the literal full comparison is approved after the pilot, use a fresh output
+directory and the revision-5 command above with these additions:
+
+```text
+--include-pgts --pgts-gibbs-steps 15 --pgts-prior-std 1
+```
+
+Do not point the PG-TS run at the existing revision-5 seven-multiplier output
+directory. Identical revision-6 commands remain resumable at candidate level,
+and `--plot-only` does not require importing `polyagamma` once all checkpoints
+exist.
+
 ### Prompt-only 20D real-label fine-grid study, 2026-09-03
 
 Branch: `experiment/prompt-routing`

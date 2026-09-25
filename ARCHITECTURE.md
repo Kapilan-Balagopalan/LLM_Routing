@@ -33,6 +33,7 @@ boolq-routing-cache-full.zip
     -> tuning.py selects all manifest-defined context blocks and cached disagreement
     -> tuning.py creates 20 paired shuffled orders
     -> tuning.py evaluates CBPSide, ETC HGB, ETC Linear, IGW Tree, and IGW Linear candidates
+    -> optional pgts.py supplies one fixed Algorithm-1 PG-TS candidate per loss/order
     -> online_tree.py supplies batch HGB, batch logistic, or incremental Hoeffding estimators
     -> tuning.py checkpoints every completed policy/l01/multiplier/order candidate
     -> tuning.py selects the lowest-mean-cost multiplier at each policy/l01 point
@@ -182,6 +183,22 @@ is affected by the tree-backend option. Aggregated Mondrian forests were not
 added because River's implementation does not accept the per-example weights
 required by the IGW estimator.
 
+### `pgts.py`
+
+Implements the opt-in Pólya-Gamma Thompson sampler from Algorithm 1 of *Apple
+Tasting Revisited*. The prior is `N(0, prior_std^2 I)` and the default is
+`prior_std=1`. Each call performs exactly `M=15` complete Pólya-Gamma/Gaussian
+Gibbs transitions, warm-started from the preceding round's final draw, and
+returns only the final parameter sample. A proper prior keeps the conditional
+precision positive definite; the Gaussian draw is computed from its Cholesky
+factor without explicitly forming a covariance inverse.
+
+The module imports `polyagamma` lazily and accepts an injected sampler for
+offline tests. It sees only the feature rows and binary disagreement outcomes
+that earlier action-1 rounds revealed. It does not own the full outcome stream,
+perform inverse-propensity weighting, or apply the tuner's adaptive snapshot
+schedule.
+
 ### `tuning.py`
 
 The `tune-llm-routing` entry point owns the exploratory pointwise multiplier
@@ -202,6 +219,24 @@ diverge, however, so they need not reveal the same feedback rows or realize the
 same propensities and IPS weights. The complete design contains 6,300 learned
 candidate rows: five policies times nine losses times seven multipliers times
 20 orders.
+
+With `--include-pgts`, the tuner additionally runs one fixed PG-TS trajectory
+for each `l01` and shuffled order. It supplies the same row-normalized context
+plus intercept used by CBPSide, draws a new final Gibbs state before every
+online action, and appends a label only after action 1. PG-TS has no generic
+exploration multiplier, so it is excluded from pointwise multiplier selection
+and the multiplier figure but included directly in the reusable candidate and
+selected-result tables and in the routing/cost plots. The legacy no-PG-TS path
+retains the revision-5 manifest fingerprint; enabling PG-TS creates a
+revision-6 fingerprint and therefore requires a fresh output directory.
+
+For the nine losses, 20 orders, and seven multipliers, PG-TS adds 180 fixed
+checkpoints to the existing 6,300 tuned checkpoints. The enabled design has
+6,480 candidate rows, 324 candidate aggregates, the same 45 multiplier
+selections, 1,260 selected order rows after adding Random, 63 selected
+summaries, and 212 progress groups. This exact every-round Gibbs path is
+computationally much heavier than the gap-32 estimators and must first be
+benchmarked on a small horizon.
 
 Adaptive snapshots for CBPSide, IGW Tree, and IGW Linear change only immediately
 before capped-doubling global-round boundaries by default. Starting at `b=1`,
@@ -332,7 +367,9 @@ or environment interfaces.
   Linear comparison. The optional weighted River
   Hoeffding sensitivity changes IGW Tree only. It exports both separately tuned
   best-vs-best and fixed-multiplier matched-gamma IGW comparisons;
-  action-dependent histories may differ in either view.
+  action-dependent histories may differ in either view. The branch also exposes
+  the opt-in faithful PG-TS comparator without changing legacy revision-5
+  fingerprints when that option is absent.
 
 Refer to `EXPERIMENTS.md` for motivations, results, and exact decisions rather
 than inferring research intent from implementation details alone.

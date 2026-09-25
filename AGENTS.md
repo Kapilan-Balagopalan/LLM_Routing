@@ -66,6 +66,14 @@
   12,648-round horizon. Use the fresh
   `boolq-138d-multiplier-sweep-hgb-etc-linear-capped-doubling-gap32-multiplier7-results`
   directory; never reuse the completed five-multiplier gap-32 directory.
+  The optional `--include-pgts` revision-6 extension adds one faithful PG-TS
+  Algorithm-1 candidate per loss/order, with 15 every-round Pólya-Gamma Gibbs
+  transitions and a zero-mean unit-covariance Gaussian prior over the
+  row-normalized context plus intercept. It has no generic multiplier, uses
+  only action-1 feedback, uses no inverse-propensity weights, and is excluded
+  from multiplier selection. It requires the `pgts` optional dependency and a
+  fresh output directory. Always run the documented 25-round pilot before
+  considering a full 138D PG-TS study; implementation work must not launch it.
 - `backup/current-combined`: recovery snapshot made before branch separation.
 
 Do not mix an experiment into another branch. Shared bug fixes should be made

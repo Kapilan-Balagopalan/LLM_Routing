@@ -23,6 +23,10 @@ beside the fixed 15-leaf HGB ETC and the matched IGW Linear versus IGW Tree
 comparison, and expands the common multiplier grid to seven values. Adaptive
 tuner refits now default to capped exponential doubling: the next global-round
 boundary is `min(2b, b+32)`.
+An optional revision-6 study adds the paper-faithful PG-TS Algorithm 1 as a
+fixed Bayesian-logistic comparator. PG-TS is opt-in because it performs fresh
+Pólya-Gamma Gibbs transitions on every online round and is much more expensive
+than the scheduled estimators.
 This does not alter the established simulator.
 
 For experiment history and conclusions, read [EXPERIMENTS.md](EXPERIMENTS.md).
@@ -97,6 +101,16 @@ study, install both extras instead:
 python -m pip install -e ".[test,online-tree]"
 python -m pytest -q
 ```
+
+To run the optional PG-TS comparator, install its Pólya-Gamma sampler as well:
+
+```powershell
+python -m pip install -e ".[test,pgts]"
+python -m pytest -q
+```
+
+The dependency marker installs `polyagamma==1.3.6` on Python 3.9 and a 2.x
+release on Python 3.10 or newer.
 
 ## Active BoolQ shuffled-order experiment
 
@@ -314,6 +328,58 @@ any policy again:
   --policy-seed 0 `
   --plot-only
 ```
+
+### Optional faithful PG-TS Algorithm 1 comparator
+
+Pass `--include-pgts` to add PG-TS from *Apple Tasting Revisited* as a fixed
+comparator. For each loss and shuffled order, PG-TS starts from a zero-mean
+Gaussian prior with covariance `prior_std^2 I`, makes `M=15` Pólya-Gamma Gibbs
+transitions before every online action, and uses only the final parameter draw.
+The context is row-L2-normalized in the same outcome-free way as CBPSide and an
+intercept is prepended. With `l11=1`, PG-TS routes to the strong model when the
+sampled disagreement probability is at least `1/l01`. Only action-1 outcomes
+enter its posterior, and no inverse-propensity weights are used.
+
+PG-TS has no analogue of the seven-value exploration multiplier. It therefore
+contributes one fixed candidate per `l01` and order, is omitted from
+`selected_multipliers.*`, and is included directly in the selected routing and
+cost tables and figures. The ordinary Gaussian draw in Appendix D is used; no
+unspecified truncation procedure is invented.
+
+Install the optional dependency, then run this small execution pilot before
+considering a full study:
+
+```powershell
+.\.routing-venv\Scripts\python.exe -m pip install -e ".[test,pgts]"
+.\.routing-venv\Scripts\python.exe -m llm_routing_simulation.tuning `
+  --cache .\boolq-routing-cache-full.zip `
+  --output-dir .\boolq-pgts-algorithm1-pilot `
+  --context-profile all-features `
+  --limit 25 `
+  --l01-values 2.6 `
+  --multipliers 1 `
+  --online-order-repeats 2 `
+  --adaptive-update-schedule capped-doubling `
+  --adaptive-max-round-gap 32 `
+  --include-pgts `
+  --pgts-gibbs-steps 15 `
+  --pgts-prior-std 1 `
+  --jobs 1 `
+  --seed 0 `
+  --policy-seed 0
+```
+
+This pilot is an execution and timing check, not a research result. A literal
+full 138D run is expected to be very costly: all Pólya-Gamma latent variables
+are resampled and a roughly 139-dimensional Gaussian system is solved 15 times
+per round. PG-TS intentionally does not use the gap-32 snapshot schedule;
+doing so would be a separate approximation rather than Algorithm 1.
+
+If the complete seven-multiplier design is run with `--include-pgts`, use a
+fresh output directory. It adds 180 fixed checkpoints to the 6,300 tuned
+checkpoints, for 6,480 total and 212 progress groups. It leaves the 45
+multiplier selections unchanged. Finalization produces 324 candidate summaries,
+1,260 selected order rows including Random, and 63 selected summary rows.
 
 ### Optional River Hoeffding-tree sensitivity
 
@@ -578,11 +644,13 @@ implementation responsibilities are summarized in
 - `src/llm_routing_simulation/run.py`: command-line orchestration and outputs.
 - `src/llm_routing_simulation/online_tree.py`: HGB, weighted standardized
   logistic, and optional weighted River Hoeffding probability backends.
+- `src/llm_routing_simulation/pgts.py`: warm-started Pólya-Gamma Gibbs sampler
+  and Thompson decision rule used by the opt-in faithful PG-TS comparator.
 - `src/llm_routing_simulation/tuning.py`: resumable pointwise multiplier sweep,
   matched ETC HGB/ETC Linear protocols, matched IGW Tree/IGW Linear comparison,
-  capped doubling with a configurable maximum gap plus Fibonacci and pure
-  doubling reproduction schedules, selection, analytic Random baseline, and
-  final plots.
+  optional fixed PG-TS candidates, capped doubling with a configurable maximum
+  gap plus Fibonacci and pure doubling reproduction schedules, selection,
+  analytic Random baseline, and final plots.
 - `src/llm_routing_simulation/synthetic_prompt.py`: synthetic-label positive
   control.
 
